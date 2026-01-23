@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Data Viewer</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Neural Activity</h1>
+            <div class="status-bar">
+                <span class="status-indicator" id="status-indicator"></span>
+                <span id="status-text">Disconnected</span>
+                <span class="separator">|</span>
+                <span id="time-display">t = 0.00s</span>
+                <span class="separator">|</span>
+                <span id="fps-counter">0 FPS</span>
+                <span class="separator">|</span>
+                <span id="channel-count">0 channels</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="canvas-container">
+                <canvas id="neural-canvas"></canvas>
+                <div class="colorbar">
+                    <div class="colorbar-gradient"></div>
+                    <div class="colorbar-labels">
+                        <span id="colorbar-max">+0.02</span>
+                        <span id="colorbar-zero">0.0</span>
+                        <span id="colorbar-min">-0.02</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <div class="controls">
+                <label for="server-url">Server URL:</label>
+                <input type="text" id="server-url" value="ws://localhost:8765">
+                <button id="connect-btn">Connect</button>
+            </div>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

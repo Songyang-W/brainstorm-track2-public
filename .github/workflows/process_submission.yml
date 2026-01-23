@@ -1,0 +1,118 @@
+name: Process Submission
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:  # Allow manual triggers
+
+# Limit concurrent runs per repository
+concurrency:
+  group: submission-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for submission file
+        id: check-submission
+        run: |
+          if [ ! -f SUBMISSION.YAML ]; then
+            echo "::warning::No SUBMISSION.YAML found."
+            echo "has_submission=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_submission=true" >> $GITHUB_OUTPUT
+            echo "Submission file found:"
+            cat SUBMISSION.YAML
+          fi
+
+      - name: Validate submission
+        id: validate
+        if: steps.check-submission.outputs.has_submission == 'true'
+        run: |
+          # Extract submission URL from YAML
+          SUBMISSION_URL=$(grep -E "^submission_url:" SUBMISSION.YAML | sed "s/submission_url: *['\"]//g" | sed "s/['\"].*//g" | xargs)
+          
+          echo "Extracted URL: $SUBMISSION_URL"
+          
+          # Check if it's the template URL
+          if [ "$SUBMISSION_URL" = "https://github.com/precision-neuroscience" ]; then
+            echo "::error::Please update SUBMISSION.YAML with your actual video URL (not the template)"
+            echo "is_valid=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check if URL is not empty
+          if [ -z "$SUBMISSION_URL" ]; then
+            echo "::error::submission_url is empty in SUBMISSION.YAML"
+            echo "is_valid=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "is_valid=true" >> $GITHUB_OUTPUT
+          echo "submission_url=$SUBMISSION_URL" >> $GITHUB_OUTPUT
+
+      - name: Skip if invalid
+        if: steps.check-submission.outputs.has_submission == 'false' || steps.validate.outputs.is_valid == 'false'
+        run: |
+          echo "⏭️ Skipping submission processing - no valid submission found."
+          echo "Update SUBMISSION.YAML with your video URL to submit."
+          exit 0
+
+      - name: Install uv
+        if: steps.validate.outputs.is_valid == 'true'
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python with uv
+        if: steps.validate.outputs.is_valid == 'true'
+        run: uv python install 3.11
+
+      - name: Process and push to results repo
+        if: steps.validate.outputs.is_valid == 'true'
+        env:
+          RESULTS_REPO_TOKEN: ${{ secrets.RESULTS_REPO_TOKEN }}
+        run: |
+          # Configure git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+          # Clone the results repository
+          git clone https://x-access-token:${RESULTS_REPO_TOKEN}@github.com/${{ github.repository_owner }}/brainstorm2026-track2-results.git results-repo
+
+          # Install dependencies in results repo
+          cd results-repo
+          uv sync
+
+          # Generate safe filename from repository name
+          # e.g., "org/repo-name" -> "org__repo-name"
+          REPO_NAME="${{ github.repository }}"
+          SAFE_NAME=$(echo "$REPO_NAME" | sed 's/\//__/g')
+          
+          # Run the processing script
+          uv run python process_submission.py \
+            --repo "$REPO_NAME" \
+            --url "${{ steps.validate.outputs.submission_url }}" \
+            --commit "${{ github.sha }}"
+
+          # Commit and push
+          git add .
+          git commit -m "Add submission for ${{ github.repository }} (commit: ${{ github.sha }})" || echo "No changes to commit"
+          git push
+
+      - name: Submission complete
+        if: steps.validate.outputs.is_valid == 'true'
+        run: |
+          echo "✅ Submission recorded successfully!"
+          echo ""
+          echo "Your submission has been recorded:"
+          echo "Repository: ${{ github.repository }}"
+          echo "Video: ${{ steps.validate.outputs.submission_url }}"
+          echo ""
+          echo "Check the results repository for your entry."
+
