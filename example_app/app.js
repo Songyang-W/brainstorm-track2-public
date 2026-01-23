@@ -131,6 +131,12 @@ function valueToColorIndex(value) {
     return Math.round(clamped * 255);
 }
 
+function processBatch(neuralData, startTimeS) {
+    // Your signal processing here
+    const features = extractFeatures(neuralData);
+    renderVisualization(features);
+}
+
 /**
  * Get RGB color string for a value.
  */

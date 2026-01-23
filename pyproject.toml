@@ -15,6 +15,7 @@ dependencies = [
     "pyarrow>=14.0.0",
     "huggingface-hub>=0.20.0",
     "pynput>=1.7.0",
+    "matplotlib>=3.10.8",
 ]
 
 [project.scripts]
