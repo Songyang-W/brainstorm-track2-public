@@ -42,9 +42,12 @@ uv run python -m scripts.download hard
 # 4. Stream data (Terminal 1)
 uv run brainstorm-stream --from-file data/hard/
 
-# 5. Run example app (Terminal 2)
+# 5. Run compass backend (Terminal 2)
+uv run brainstorm-compass
+
+# 6. Run UI server (Terminal 3)
 uv run brainstorm-serve
-# Open http://localhost:8000
+# Open http://localhost:8000 (connects to ws://localhost:8767 by default)
 ```
 
 The example app shows a basic heatmap. **Your solution should go far beyond this!**

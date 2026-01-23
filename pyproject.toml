@@ -22,6 +22,7 @@ dependencies = [
 brainstorm-stream = "scripts.stream_data:app"
 brainstorm-serve = "scripts.serve:app"
 brainstorm-control = "scripts.control_client:app"
+brainstorm-compass = "scripts.compass_backend:app"
 
 [build-system]
 requires = ["hatchling"]

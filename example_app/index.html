@@ -3,47 +3,96 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Neural Data Viewer</title>
+    <title>Compass HUD</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>Neural Activity</h1>
-            <div class="status-bar">
-                <span class="status-indicator" id="status-indicator"></span>
-                <span id="status-text">Disconnected</span>
-                <span class="separator">|</span>
-                <span id="time-display">t = 0.00s</span>
-                <span class="separator">|</span>
-                <span id="fps-counter">0 FPS</span>
-                <span class="separator">|</span>
-                <span id="channel-count">0 channels</span>
+    <div class="hud">
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true"></div>
+                <div class="brand-text">
+                    <div class="brand-title">COMPASS</div>
+                    <div class="brand-subtitle">Array placement guidance</div>
+                </div>
+            </div>
+
+            <div class="status">
+                <div class="pill" id="connection-pill">
+                    <span class="dot" id="status-indicator"></span>
+                    <span id="status-text">DISCONNECTED</span>
+                </div>
+                <div class="pill subtle">
+                    <span class="label">t</span>
+                    <span class="value" id="time-display">0.00s</span>
+                </div>
+                <div class="pill subtle">
+                    <span class="label">conf</span>
+                    <span class="value" id="confidence-display">0%</span>
+                </div>
+                <div class="pill subtle">
+                    <span class="label">dist</span>
+                    <span class="value" id="distance-display">--</span>
+                </div>
             </div>
         </header>
 
-        <main>
-            <div class="canvas-container">
-                <canvas id="neural-canvas"></canvas>
-                <div class="colorbar">
-                    <div class="colorbar-gradient"></div>
-                    <div class="colorbar-labels">
-                        <span id="colorbar-max">+0.02</span>
-                        <span id="colorbar-zero">0.0</span>
-                        <span id="colorbar-min">-0.02</span>
+        <main class="layout">
+            <section class="compass" aria-label="Guidance">
+                <div class="compass-frame">
+                    <div class="ring" aria-hidden="true"></div>
+                    <div class="ring ring2" aria-hidden="true"></div>
+                    <div class="crosshair" aria-hidden="true"></div>
+
+                    <div class="arrow" id="arrow">
+                        <div class="arrow-shaft" aria-hidden="true"></div>
+                        <div class="arrow-head" aria-hidden="true"></div>
+                    </div>
+
+                    <div class="lock" id="lock">
+                        <div class="lock-title">LOCKED</div>
+                        <div class="lock-sub">Hold position</div>
                     </div>
                 </div>
-            </div>
+
+                <div class="readout">
+                    <div class="readout-row">
+                        <div class="readout-label">MOVE</div>
+                        <div class="readout-value" id="move-display">--</div>
+                    </div>
+                    <div class="meter">
+                        <div class="meter-bar" id="confidence-bar"></div>
+                    </div>
+                    <div class="readout-foot">
+                        <span id="mode-text">SEARCHING</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="maps" aria-label="Maps">
+                <div class="map-card">
+                    <div class="map-title">LIVE</div>
+                    <canvas id="heatmap-canvas" width="320" height="320"></canvas>
+                </div>
+                <div class="map-card">
+                    <div class="map-title">MEMORY</div>
+                    <canvas id="memory-canvas" width="320" height="320"></canvas>
+                </div>
+            </section>
         </main>
 
-        <footer>
+        <footer class="bottombar">
             <div class="controls">
-                <label for="server-url">Server URL:</label>
-                <input type="text" id="server-url" value="ws://localhost:8765">
-                <button id="connect-btn">Connect</button>
+                <label class="ctl-label" for="server-url">Backend WS</label>
+                <input type="text" id="server-url" value="ws://localhost:8767">
+                <button id="connect-btn">CONNECT</button>
+                <button id="reset-btn" class="ghost">RESET</button>
+            </div>
+            <div class="hint">
+                Use arrow keys in the control client. This display is read-only.
             </div>
         </footer>
     </div>

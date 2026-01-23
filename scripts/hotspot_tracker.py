@@ -34,7 +34,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from scipy import ndimage
-from scipy.signal import butter, sosfiltfilt, hilbert
+from scipy.signal import butter, hilbert, iirnotch, sosfiltfilt, tf2sos
+from scipy.optimize import linear_sum_assignment
 from scipy.stats import pearsonr
 from pathlib import Path
 
@@ -57,7 +58,13 @@ class SignalProcessor:
     
     def __init__(self, fs=500, lowcut=70, highcut=150, 
                  ema_alpha=0.1, spatial_sigma=1.0,
-                 envelope_method='hilbert'):
+                 envelope_method='hilbert',
+                 grid_transform="rot180",
+                 notch_freqs=(120.0,),
+                 notch_q=30.0,
+                 common_average_reference=True,
+                 normalize="robust_z",
+                 clip_negative=True):
         """
         Initialize the signal processor.
         
@@ -69,6 +76,14 @@ class SignalProcessor:
                        Higher = more responsive, Lower = more smooth
             spatial_sigma: Gaussian smoothing sigma for spatial filtering
             envelope_method: 'hilbert' or 'square' for envelope extraction
+            grid_transform: 'none' or 'rot180'. Empirically, the provided parquet
+                channel ordering maps to a grid rotated 180 degrees relative to
+                the ground_truth coordinates in this repo.
+            notch_freqs: Frequencies to notch filter (Hz) before bandpass
+            notch_q: Q factor for notch filters (higher = narrower)
+            common_average_reference: Subtract mean across channels per sample
+            normalize: 'none' or 'robust_z' (median/MAD normalization per frame)
+            clip_negative: If True, clamp normalized grid to >= 0 (good for heatmaps)
         """
         self.fs = fs
         self.lowcut = lowcut
@@ -76,16 +91,26 @@ class SignalProcessor:
         self.ema_alpha = ema_alpha
         self.spatial_sigma = spatial_sigma
         self.envelope_method = envelope_method
+        self.grid_transform = grid_transform
+        self.notch_freqs = tuple(notch_freqs) if notch_freqs else tuple()
+        self.notch_q = notch_q
+        self.common_average_reference = common_average_reference
+        self.normalize = normalize
+        self.clip_negative = clip_negative
         
         # Pre-compute filter coefficients
         self.sos = butter(4, [lowcut, highcut], btype='band', fs=fs, output='sos')
+        self.notch_sos = []
+        for f0 in self.notch_freqs:
+            b, a = iirnotch(w0=f0, Q=self.notch_q, fs=self.fs)
+            self.notch_sos.append(tf2sos(b, a))
         
         # State for real-time EMA smoothing
         self.ema_state = None
         
     def bandpass_filter(self, data):
         """
-        Apply bandpass filter to extract frequency band of interest.
+        Apply notch filter(s) then bandpass filter to extract frequency band of interest.
         
         Args:
             data: numpy array (n_samples, n_channels) or (n_samples,)
@@ -93,7 +118,10 @@ class SignalProcessor:
         Returns:
             Filtered data with same shape
         """
-        return sosfiltfilt(self.sos, data, axis=0)
+        x = data
+        for ns in self.notch_sos:
+            x = sosfiltfilt(ns, x, axis=0)
+        return sosfiltfilt(self.sos, x, axis=0)
     
     def extract_envelope(self, filtered_data):
         """
@@ -177,7 +205,11 @@ class SignalProcessor:
         Returns:
             32x32 numpy array
         """
-        return np.array(channel_data).reshape(32, 32)
+        grid = np.array(channel_data).reshape(32, 32)
+        if self.grid_transform == "rot180":
+            # Match ground_truth coordinate system for this dataset.
+            grid = np.flipud(np.fliplr(grid))
+        return grid
     
     def spatial_smooth(self, grid):
         """
@@ -211,7 +243,11 @@ class SignalProcessor:
         else:
             data = raw_data
             
-        # Step 1: Bandpass filter
+        # Optional CAR to remove common-mode noise.
+        if self.common_average_reference and data.ndim == 2 and data.shape[1] > 1:
+            data = data - data.mean(axis=1, keepdims=True)
+
+        # Step 1: Notch + bandpass
         filtered = self.bandpass_filter(data)
         
         # Step 2: Extract envelope
@@ -232,6 +268,14 @@ class SignalProcessor:
         
         # Step 5: Spatial smoothing
         grid = self.spatial_smooth(grid)
+
+        # Step 6: Per-frame robust normalization for stability across noise/drift.
+        if self.normalize == "robust_z":
+            med = float(np.median(grid))
+            mad = float(np.median(np.abs(grid - med))) + 1e-6
+            grid = (grid - med) / mad
+            if self.clip_negative:
+                grid = np.maximum(grid, 0.0)
         
         return grid
     
@@ -384,6 +428,190 @@ class HotspotTracker:
         return hotspots, (avg_row, avg_col), velocity_prediction
 
 
+class DirectionalAccumulator:
+    """
+    Accumulate direction-specific activity maps to recover all 4 hotspot centers.
+
+    Maintains a persistent presence map per direction (vx+/vx-/vy+/vy-) using
+    velocity gating. The presence map is updated from a binary activation mask,
+    so the algorithm remembers historically active cluster areas even when they
+    are temporarily silent.
+    """
+
+    def __init__(
+        self,
+        speed_thresh=0.1,
+        axis_dominance=1.2,
+        presence_decay=0.98,
+        presence_gain=0.2,
+        mask_z=2.5,
+        mask_percentile=90.0,
+        presence_sigma=1.0,
+        presence_percentile=70.0,
+        presence_min_threshold=0.05,
+        min_component_size=8,
+    ):
+        """
+        Initialize the directional accumulator.
+
+        Args:
+            speed_thresh: Minimum |velocity| to update a direction map
+            axis_dominance: Ratio needed to treat vx or vy as dominant
+            presence_decay: Per-step decay for persistence (0-1)
+            presence_gain: Gain for new masks (higher = faster memory update)
+            mask_z: Robust z-score threshold for activation mask
+            mask_percentile: Fallback percentile threshold for activation mask
+            presence_sigma: Gaussian smoothing for presence map
+            presence_percentile: Percentile threshold for cluster extraction
+            presence_min_threshold: Minimum threshold for presence mask
+            min_component_size: Minimum pixels to use for a cluster
+        """
+        self.speed_thresh = speed_thresh
+        self.axis_dominance = axis_dominance
+        self.presence_decay = presence_decay
+        self.presence_gain = presence_gain
+        self.mask_z = mask_z
+        self.mask_percentile = mask_percentile
+        self.presence_sigma = presence_sigma
+        self.presence_percentile = presence_percentile
+        self.presence_min_threshold = presence_min_threshold
+        self.min_component_size = min_component_size
+        self.maps = {
+            "vx_pos": None,
+            "vx_neg": None,
+            "vy_pos": None,
+            "vy_neg": None,
+        }
+
+    def reset(self):
+        """Reset all accumulated maps."""
+        for key in self.maps:
+            self.maps[key] = None
+
+    def _decay_all(self):
+        for key, grid in self.maps.items():
+            if grid is not None:
+                self.maps[key] = grid * self.presence_decay
+
+    def _robust_zscore(self, grid):
+        median = np.median(grid)
+        mad = np.median(np.abs(grid - median)) + 1e-6
+        return (grid - median) / mad
+
+    def _activation_mask(self, grid):
+        z = self._robust_zscore(grid)
+        mask = z >= self.mask_z
+        if mask.sum() < self.min_component_size:
+            threshold = np.percentile(z, self.mask_percentile)
+            mask = z >= threshold
+        if mask.sum() >= self.min_component_size * 4:
+            mask = ndimage.binary_opening(mask, structure=np.ones((2, 2)))
+        return mask
+
+    def _update_presence(self, key, mask):
+        if self.maps[key] is None:
+            self.maps[key] = mask.astype(float)
+            return
+        updated = self.maps[key] + self.presence_gain * mask.astype(float)
+        updated = np.clip(updated, 0.0, 1.0)
+        self.maps[key] = updated
+
+    def update(self, grid, vx, vy):
+        """Update directional maps based on current velocity."""
+        self._decay_all()
+
+        vx_val = 0.0 if vx is None else float(vx)
+        vy_val = 0.0 if vy is None else float(vy)
+
+        ax = abs(vx_val)
+        ay = abs(vy_val)
+        if ax < self.speed_thresh and ay < self.speed_thresh:
+            return None
+
+        mask = self._activation_mask(grid)
+
+        if ax >= self.axis_dominance * ay and ax > self.speed_thresh:
+            if vx_val > 0:
+                self._update_presence("vx_pos", mask)
+            else:
+                self._update_presence("vx_neg", mask)
+
+        if ay >= self.axis_dominance * ax and ay > self.speed_thresh:
+            if vy_val > 0:
+                self._update_presence("vy_pos", mask)
+            else:
+                self._update_presence("vy_neg", mask)
+
+    def _weighted_centroid(self, weights):
+        total = weights.sum()
+        if total <= 0:
+            return None
+        rows, cols = np.indices(weights.shape)
+        row = np.sum(rows * weights) / total
+        col = np.sum(cols * weights) / total
+        return row, col
+
+    def _center_from_map(self, grid):
+        if grid is None:
+            return None
+        smoothed = ndimage.gaussian_filter(grid, sigma=self.presence_sigma)
+        max_val = float(np.max(smoothed))
+        if max_val <= 0:
+            return None
+        threshold = np.percentile(smoothed, self.presence_percentile)
+        threshold = max(threshold, self.presence_min_threshold)
+        mask = smoothed >= threshold
+
+        labeled, num = ndimage.label(mask)
+        if num == 0:
+            return self._weighted_centroid(smoothed)
+
+        sums = ndimage.sum(smoothed, labeled, range(1, num + 1))
+        best = int(np.argmax(sums)) + 1
+        component = labeled == best
+        if component.sum() < self.min_component_size:
+            return self._weighted_centroid(smoothed)
+
+        return self._weighted_centroid(smoothed * component)
+
+    def get_centers(self, tracker):
+        """Detect cluster centers from each directional map."""
+        centers = {}
+        for key, grid in self.maps.items():
+            if grid is None:
+                continue
+            center = self._center_from_map(grid)
+            if center is not None:
+                centers[key] = center
+        return centers
+
+    def estimate_center(self, tracker):
+        """
+        Estimate the overall center from opposing directional centers.
+
+        Returns:
+            (row, col, centers_dict)
+        """
+        centers = self.get_centers(tracker)
+
+        row = None
+        col = None
+
+        if "vy_pos" in centers and "vy_neg" in centers:
+            row = (centers["vy_pos"][0] + centers["vy_neg"][0]) / 2.0
+        elif centers:
+            rows = [val[0] for val in centers.values()]
+            row = sum(rows) / len(rows)
+
+        if "vx_pos" in centers and "vx_neg" in centers:
+            col = (centers["vx_pos"][1] + centers["vx_neg"][1]) / 2.0
+        elif centers:
+            cols = [val[1] for val in centers.values()]
+            col = sum(cols) / len(cols)
+
+        return row, col, centers
+
+
 def load_data(difficulty="super_easy"):
     """Load neural data and ground truth for a given difficulty."""
     data_path = Path(f"data/{difficulty}")
@@ -509,6 +737,838 @@ def track_hotspots_over_time(df, ground_truth, tracker, t_start=0, t_end=30,
         results['avg_col'].append(avg_center[1] if avg_center[1] else 16)
     
     return pd.DataFrame(results)
+
+
+def _find_gt_column(ground_truth, candidates):
+    for name in candidates:
+        if name in ground_truth.columns:
+            return name
+    return None
+
+
+def _get_gt_time_array(ground_truth):
+    if "time_s" in ground_truth.columns:
+        return ground_truth["time_s"].values
+    return ground_truth.index.values
+
+
+def _get_gt_center_columns(ground_truth):
+    return {
+        "vx_pos": (
+            _find_gt_column(ground_truth, ["vx_pos_center_row", "vx_pos_row"]),
+            _find_gt_column(ground_truth, ["vx_pos_center_col", "vx_pos_col"]),
+        ),
+        "vx_neg": (
+            _find_gt_column(ground_truth, ["vx_neg_center_row", "vx_neg_row"]),
+            _find_gt_column(ground_truth, ["vx_neg_center_col", "vx_neg_col"]),
+        ),
+        "vy_pos": (
+            _find_gt_column(ground_truth, ["vy_pos_center_row", "vy_pos_row"]),
+            _find_gt_column(ground_truth, ["vy_pos_center_col", "vy_pos_col"]),
+        ),
+        "vy_neg": (
+            _find_gt_column(ground_truth, ["vy_neg_center_row", "vy_neg_row"]),
+            _find_gt_column(ground_truth, ["vy_neg_center_col", "vy_neg_col"]),
+        ),
+    }
+
+
+def compute_ground_truth_center(ground_truth, gt_idx):
+    """
+    Compute true center from ground truth region centers.
+
+    Prefer click center if present. Otherwise average available region centers.
+
+    Ground truth coordinates are sometimes already 0-indexed (this repo's
+    super_easy has values hitting 0 and 32). We detect indexing and only shift
+    if everything looks 1-indexed.
+    """
+    if "click_center_row" in ground_truth.columns and "click_center_col" in ground_truth.columns:
+        row = float(ground_truth["click_center_row"].iloc[gt_idx])
+        col = float(ground_truth["click_center_col"].iloc[gt_idx])
+        return row, col, {"click": (row, col)}
+
+    centers = {}
+    columns = _get_gt_center_columns(ground_truth)
+
+    # Detect whether centers are 1-indexed. If any center reaches 0, treat as 0-indexed.
+    all_vals = []
+    for row_col, col_col in columns.values():
+        if row_col:
+            all_vals.append(float(ground_truth[row_col].iloc[gt_idx]))
+        if col_col:
+            all_vals.append(float(ground_truth[col_col].iloc[gt_idx]))
+    is_one_indexed = bool(all_vals) and min(all_vals) >= 1.0
+    shift = 1.0 if is_one_indexed else 0.0
+
+    for key, (row_col, col_col) in columns.items():
+        if row_col and col_col:
+            row_val = float(ground_truth[row_col].iloc[gt_idx]) - shift
+            col_val = float(ground_truth[col_col].iloc[gt_idx]) - shift
+            centers[key] = (row_val, col_val)
+
+    if not centers:
+        return None, None, centers
+
+    rows = [val[0] for val in centers.values()]
+    cols = [val[1] for val in centers.values()]
+    center_row = sum(rows) / len(rows)
+    center_col = sum(cols) / len(cols)
+
+    return center_row, center_col, centers
+
+
+def extract_peak_observations(
+    grid,
+    n_peaks=2,
+    smooth_sigma=1.0,
+    suppress_radius=6,
+    com_radius=2,
+):
+    """
+    Robustly extract the top-N peak locations from a 32x32 activity grid.
+
+    This avoids connected-component merging and produces stable observations for
+    tracking even when only 1-2 spots are lit in a frame.
+    """
+    g = ndimage.gaussian_filter(grid, sigma=smooth_sigma)
+    work = g.copy()
+
+    peaks = []
+    for _ in range(n_peaks):
+        idx = np.argmax(work)
+        peak_val = float(work.flat[idx])
+        if not np.isfinite(peak_val) or peak_val <= 0:
+            break
+
+        r0, c0 = np.unravel_index(idx, work.shape)
+
+        r1 = max(0, r0 - com_radius)
+        r2 = min(work.shape[0], r0 + com_radius + 1)
+        c1 = max(0, c0 - com_radius)
+        c2 = min(work.shape[1], c0 + com_radius + 1)
+        patch = g[r1:r2, c1:c2]
+        pr, pc = np.indices(patch.shape)
+        total = float(patch.sum())
+        if total > 0:
+            rr = (pr * patch).sum() / total + r1
+            cc = (pc * patch).sum() / total + c1
+        else:
+            rr, cc = float(r0), float(c0)
+
+        peaks.append((float(rr), float(cc), peak_val))
+
+        # Suppress a neighborhood so we don't pick the same spot again.
+        sr1 = max(0, r0 - suppress_radius)
+        sr2 = min(work.shape[0], r0 + suppress_radius + 1)
+        sc1 = max(0, c0 - suppress_radius)
+        sc2 = min(work.shape[1], c0 + suppress_radius + 1)
+        work[sr1:sr2, sc1:sc2] = float("-inf")
+
+    return peaks
+
+
+class PersistentSpotClusterTracker:
+    """
+    Track a set of hotspot components across time with explicit memory.
+
+    Key idea: estimate frame-to-frame drift as a rigid translation from the spots
+    we *do* see, then apply that translation to spots we *don't* see so they
+    remain in the correct (moving) coordinate frame.
+    """
+
+    def __init__(
+        self,
+        max_tracks=4,
+        ema_alpha=0.25,
+        max_match_dist=6.0,
+        strength_gain=0.3,
+        strength_decay=0.98,
+        max_age=200,
+    ):
+        self.max_tracks = max_tracks
+        self.ema_alpha = ema_alpha
+        self.max_match_dist = max_match_dist
+        self.strength_gain = strength_gain
+        self.strength_decay = strength_decay
+        self.max_age = max_age
+        self._tracks = []  # list of dict(pos=np.array([r,c]), strength=float, age=int)
+
+    def reset(self):
+        self._tracks = []
+
+    def _prune(self):
+        kept = []
+        for tr in self._tracks:
+            if tr["age"] <= self.max_age and tr["strength"] > 1e-3:
+                kept.append(tr)
+        self._tracks = kept[: self.max_tracks]
+
+    def update(self, observations):
+        """
+        Update tracker with a list of observed (row, col) points.
+
+        Returns:
+            (center_row, center_col, tracks_positions)
+        """
+        obs = [np.array([r, c], dtype=float) for (r, c, _v) in observations]
+
+        # Age/decay all tracks (memory persists but fades if never reinforced).
+        for tr in self._tracks:
+            tr["age"] += 1
+            tr["strength"] *= self.strength_decay
+
+        if not self._tracks:
+            for p in obs[: self.max_tracks]:
+                self._tracks.append({"pos": p, "strength": 0.8, "age": 0})
+            return self.center()
+
+        if not obs:
+            self._prune()
+            return self.center()
+
+        # Assignment: tracks <-> observations.
+        T = len(self._tracks)
+        O = len(obs)
+        cost = np.zeros((T, O), dtype=float)
+        for i, tr in enumerate(self._tracks):
+            for j, p in enumerate(obs):
+                cost[i, j] = np.linalg.norm(p - tr["pos"])
+
+        row_ind, col_ind = linear_sum_assignment(cost)
+        matches = []
+        unmatched_obs = set(range(O))
+        matched_tracks = set()
+        for i, j in zip(row_ind, col_ind):
+            if cost[i, j] <= self.max_match_dist:
+                matches.append((i, j))
+                unmatched_obs.discard(j)
+                matched_tracks.add(i)
+
+        # Estimate rigid translation drift from matched pairs.
+        if matches:
+            deltas = [obs[j] - self._tracks[i]["pos"] for (i, j) in matches]
+            delta = np.mean(deltas, axis=0)
+        else:
+            delta = np.array([0.0, 0.0], dtype=float)
+
+        # Apply drift prediction to all tracks (including unseen ones).
+        if np.any(delta):
+            for tr in self._tracks:
+                tr["pos"] = tr["pos"] + delta
+
+        # Correct matched tracks with EMA toward their observations.
+        for i, j in matches:
+            tr = self._tracks[i]
+            tr["pos"] = (1 - self.ema_alpha) * tr["pos"] + self.ema_alpha * obs[j]
+            tr["strength"] = min(1.0, tr["strength"] + self.strength_gain)
+            tr["age"] = 0
+
+        # Spawn new tracks for unmatched observations.
+        for j in list(unmatched_obs):
+            if len(self._tracks) >= self.max_tracks:
+                break
+            self._tracks.append({"pos": obs[j], "strength": 0.6, "age": 0})
+
+        self._prune()
+        return self.center()
+
+    def center(self):
+        if not self._tracks:
+            return None, None, []
+        weights = np.array([tr["strength"] for tr in self._tracks], dtype=float)
+        positions = np.stack([tr["pos"] for tr in self._tracks], axis=0)
+        wsum = float(weights.sum())
+        if wsum <= 0:
+            center = positions.mean(axis=0)
+        else:
+            center = (positions * weights[:, None]).sum(axis=0) / wsum
+        return float(center[0]), float(center[1]), [tuple(p.tolist()) for p in positions]
+
+
+def track_persistent_cluster_center_over_time(
+    df,
+    ground_truth,
+    tracker,
+    cluster_tracker=None,
+    t_start=0,
+    t_end=30,
+    window_size=0.2,
+    step=0.1,
+    processor=None,
+):
+    """
+    Track cluster center from neural data alone (no vx/vy gating).
+
+    This is designed for the "only 2 lit at a time" case: it tracks multiple spot
+    components with memory and rigid drift propagation.
+    """
+    if processor is None:
+        processor = SignalProcessor()
+    if cluster_tracker is None:
+        cluster_tracker = PersistentSpotClusterTracker(max_tracks=4)
+
+    times = np.arange(t_start, t_end - window_size, step)
+    gt_time = _get_gt_time_array(ground_truth)
+
+    results = {
+        "time": [],
+        "est_row": [],
+        "est_col": [],
+        "true_row": [],
+        "true_col": [],
+        "n_obs": [],
+        "n_tracks": [],
+    }
+
+    for t in times:
+        power = compute_power_grid(df, t, window_size, processor)
+        observations = extract_peak_observations(
+            power, n_peaks=2, smooth_sigma=1.0, suppress_radius=6
+        )
+        est_row, est_col, tracks_pos = cluster_tracker.update(observations)
+
+        gt_idx = np.abs(gt_time - t).argmin()
+        true_row, true_col, _ = compute_ground_truth_center(ground_truth, gt_idx)
+
+        results["time"].append(t)
+        results["est_row"].append(est_row if est_row is not None else np.nan)
+        results["est_col"].append(est_col if est_col is not None else np.nan)
+        results["true_row"].append(true_row if true_row is not None else np.nan)
+        results["true_col"].append(true_col if true_col is not None else np.nan)
+        results["n_obs"].append(len(observations))
+        results["n_tracks"].append(len(tracks_pos))
+
+    return pd.DataFrame(results)
+
+
+class CrossCenterTracker:
+    """
+    Estimate the center of a 4-spot cross from observations where only 1-2 arms
+    are active at any moment.
+
+    This uses a simple geometric model:
+      horizontal arm: (center_row, center_col +/- dx)
+      vertical arm:   (center_row +/- dy, center_col)
+
+    When two spots are visible (one horizontal + one vertical), the center is
+    solvable directly by trying the (sign_x, sign_y) combinations and choosing
+    the most self-consistent solution.
+    """
+
+    def __init__(
+        self,
+        center_alpha=0.35,
+        offset_alpha=0.1,
+        min_offset=2.0,
+        max_offset=20.0,
+    ):
+        self.center_alpha = center_alpha
+        self.offset_alpha = offset_alpha
+        self.min_offset = min_offset
+        self.max_offset = max_offset
+        self.center = None  # np.array([row, col])
+        self.dx = None
+        self.dy = None
+
+    def reset(self):
+        self.center = None
+        self.dx = None
+        self.dy = None
+
+    def _clip_offset(self, v):
+        return float(np.clip(v, self.min_offset, self.max_offset))
+
+    def _update_offsets(self, dx_obs, dy_obs):
+        dx_obs = self._clip_offset(dx_obs)
+        dy_obs = self._clip_offset(dy_obs)
+        if self.dx is None:
+            self.dx = dx_obs
+        else:
+            self.dx = (1 - self.offset_alpha) * self.dx + self.offset_alpha * dx_obs
+        if self.dy is None:
+            self.dy = dy_obs
+        else:
+            self.dy = (1 - self.offset_alpha) * self.dy + self.offset_alpha * dy_obs
+
+    def _center_from_two(self, p_h, p_v):
+        """
+        Compute best center candidate assuming p_h is horizontal-arm spot and
+        p_v is vertical-arm spot.
+        """
+        if self.dx is None or self.dy is None:
+            return None, float("inf")
+
+        best = None
+        best_score = float("inf")
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                # horizontal: (cr, cc+sx*dx) -> cc = ch - sx*dx, cr = rh
+                cr1 = float(p_h[0])
+                cc1 = float(p_h[1] - sx * self.dx)
+                # vertical: (cr+sy*dy, cc) -> cr = rv - sy*dy, cc = cv
+                cr2 = float(p_v[0] - sy * self.dy)
+                cc2 = float(p_v[1])
+                score = abs(cr1 - cr2) + abs(cc1 - cc2)
+                if score < best_score:
+                    best_score = score
+                    best = np.array([(cr1 + cr2) / 2.0, (cc1 + cc2) / 2.0], dtype=float)
+        return best, best_score
+
+    def update(self, observations):
+        obs = [(r, c, v) for (r, c, v) in observations]
+        obs.sort(key=lambda x: x[2], reverse=True)
+        obs = obs[:2]
+
+        if len(obs) == 2:
+            p1 = np.array([obs[0][0], obs[0][1]], dtype=float)
+            p2 = np.array([obs[1][0], obs[1][1]], dtype=float)
+
+            dx_obs = abs(p1[1] - p2[1])
+            dy_obs = abs(p1[0] - p2[0])
+            self._update_offsets(dx_obs, dy_obs)
+
+            # Try both assignments (p1 as horizontal vs p2 as horizontal).
+            c12, s12 = self._center_from_two(p1, p2)
+            c21, s21 = self._center_from_two(p2, p1)
+
+            # Pick the candidate closest to previous center (if we have one),
+            # otherwise choose the one with in-bounds coordinates.
+            candidates = [(c, s) for (c, s) in ((c12, s12), (c21, s21)) if c is not None]
+            if not candidates:
+                return self.center_state()
+
+            if self.center is None:
+                # Prefer candidate inside the grid.
+                def in_bounds(c):
+                    return 0 <= c[0] <= 31 and 0 <= c[1] <= 31
+                candidates.sort(key=lambda cs: (not in_bounds(cs[0]), cs[1]))
+                self.center = candidates[0][0]
+            else:
+                # Prefer lower self-consistency score; break ties by proximity.
+                candidates.sort(
+                    key=lambda cs: (cs[1], float(np.linalg.norm(cs[0] - self.center)))
+                )
+                self.center = (1 - self.center_alpha) * self.center + self.center_alpha * candidates[0][0]
+
+        elif len(obs) == 1 and self.center is not None and self.dx is not None and self.dy is not None:
+            p = np.array([obs[0][0], obs[0][1]], dtype=float)
+            # Snap to the nearest predicted arm and update center accordingly.
+            cr, cc = float(self.center[0]), float(self.center[1])
+            preds = {
+                "vx_pos": np.array([cr, cc + self.dx]),
+                "vx_neg": np.array([cr, cc - self.dx]),
+                "vy_pos": np.array([cr - self.dy, cc]),
+                "vy_neg": np.array([cr + self.dy, cc]),
+            }
+            best_key = min(preds.keys(), key=lambda k: float(np.linalg.norm(p - preds[k])))
+            if best_key == "vx_pos":
+                cand = np.array([p[0], p[1] - self.dx])
+            elif best_key == "vx_neg":
+                cand = np.array([p[0], p[1] + self.dx])
+            elif best_key == "vy_pos":
+                cand = np.array([p[0] + self.dy, p[1]])
+            else:
+                cand = np.array([p[0] - self.dy, p[1]])
+            self.center = (1 - self.center_alpha) * self.center + self.center_alpha * cand
+
+        return self.center_state()
+
+    def center_state(self):
+        if self.center is None:
+            return None, None, None, None
+        return float(self.center[0]), float(self.center[1]), self.dx, self.dy
+
+
+def _bilinear_sample(grid, r, c, fill_value=float("-inf")):
+    """Bilinear sample from grid at floating (r, c)."""
+    h, w = grid.shape
+    if r < 0 or c < 0 or r > h - 1 or c > w - 1:
+        return fill_value
+    r0 = int(np.floor(r))
+    c0 = int(np.floor(c))
+    r1 = min(r0 + 1, h - 1)
+    c1 = min(c0 + 1, w - 1)
+    dr = r - r0
+    dc = c - c0
+    v00 = grid[r0, c0]
+    v01 = grid[r0, c1]
+    v10 = grid[r1, c0]
+    v11 = grid[r1, c1]
+    return (
+        (1 - dr) * (1 - dc) * v00
+        + (1 - dr) * dc * v01
+        + dr * (1 - dc) * v10
+        + dr * dc * v11
+    )
+
+
+def _gaussian_patch_energy(grid, r, c, radius=3, sigma=1.25, fill_value=0.0):
+    """
+    Sum grid energy in a small Gaussian-weighted patch centered at (r, c).
+
+    This is much more robust than point sampling when each region is a cluster
+    of scattered spots (medium/hard).
+    """
+    h, w = grid.shape
+    rr = int(round(r))
+    cc = int(round(c))
+    if rr + radius < 0 or rr - radius >= h or cc + radius < 0 or cc - radius >= w:
+        return float(fill_value)
+    r1 = rr - radius
+    c1 = cc - radius
+    size = 2 * radius + 1
+
+    y, x = np.mgrid[-radius : radius + 1, -radius : radius + 1]
+    kernel = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
+    kernel = kernel / (kernel.sum() + 1e-9)
+
+    patch = np.full((size, size), fill_value, dtype=float)
+    pr1 = max(0, r1)
+    pr2 = max(0, min(h, rr + radius + 1))
+    pc1 = max(0, c1)
+    pc2 = max(0, min(w, cc + radius + 1))
+    if pr2 <= pr1 or pc2 <= pc1:
+        return float(fill_value)
+    patch[(pr1 - r1) : (pr2 - r1), (pc1 - c1) : (pc2 - c1)] = grid[pr1:pr2, pc1:pc2]
+    return float(np.sum(patch * kernel))
+
+
+class CrossMatchedFilterTracker:
+    """
+    Robust cross-center tracker that does NOT rely on 'remembering' off-spots.
+
+    Once it has learned dx/dy (arm offsets), it estimates the center each frame by
+    searching for the center whose predicted arm locations best match the current
+    activity (matched filter / template score).
+    """
+
+    def __init__(
+        self,
+        search_radius=6,
+        center_alpha=0.6,
+        fixed_dx=6.0,
+        fixed_dy=6.0,
+        patch_radius=3,
+        patch_sigma=1.25,
+        global_search=True,
+    ):
+        self.search_radius = search_radius
+        self.center_alpha = center_alpha
+        self.dx = fixed_dx
+        self.dy = fixed_dy
+        self.patch_radius = patch_radius
+        self.patch_sigma = patch_sigma
+        self.global_search = global_search
+        self.center = None  # np.array([row, col])
+        self.last_score = None
+        self.last_confidence = None
+        # Precompute Gaussian kernel for patch scoring.
+        r = self.patch_radius
+        y, x = np.mgrid[-r : r + 1, -r : r + 1]
+        kernel = np.exp(-(x * x + y * y) / (2 * self.patch_sigma * self.patch_sigma))
+        self._kernel = kernel / (kernel.sum() + 1e-9)
+
+    def reset(self):
+        self.center = None
+        self.last_score = None
+        self.last_confidence = None
+
+    def _template_score(self, grid, cr, cc):
+        # Best of the 4 sign combinations (vx sign, vy sign).
+        best = float("-inf")
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                s = self._patch_energy(grid, cr, cc + sx * self.dx) + self._patch_energy(
+                    grid, cr + sy * self.dy, cc
+                )
+                if s > best:
+                    best = s
+        return best
+
+    def _patch_energy(self, grid, r, c):
+        radius = self.patch_radius
+        h, w = grid.shape
+        rr = int(round(r))
+        cc = int(round(c))
+        if rr + radius < 0 or rr - radius >= h or cc + radius < 0 or cc - radius >= w:
+            return 0.0
+        r1 = rr - radius
+        c1 = cc - radius
+        size = 2 * radius + 1
+        patch = np.zeros((size, size), dtype=float)
+        pr1 = max(0, r1)
+        pr2 = min(h, rr + radius + 1)
+        pc1 = max(0, c1)
+        pc2 = min(w, cc + radius + 1)
+        patch[(pr1 - r1) : (pr2 - r1), (pc1 - c1) : (pc2 - c1)] = grid[pr1:pr2, pc1:pc2]
+        return float(np.sum(patch * self._kernel))
+
+    def update(self, grid):
+        if self.dx is None or self.dy is None:
+            return None, None, None, None
+
+        if self.center is None:
+            self.center = np.array([15.5, 15.5], dtype=float)
+
+        r0 = int(round(float(self.center[0])))
+        c0 = int(round(float(self.center[1])))
+        best_score = float("-inf")
+        best_rc = np.array([r0, c0], dtype=float)
+        scores = []
+
+        if self.global_search:
+            r_range = range(0, 32)
+            c_range = range(0, 32)
+        else:
+            r_range = range(r0 - self.search_radius, r0 + self.search_radius + 1)
+            c_range = range(c0 - self.search_radius, c0 + self.search_radius + 1)
+
+        for r in r_range:
+            for c in c_range:
+                s = self._template_score(grid, float(r), float(c))
+                scores.append(s)
+                if s > best_score:
+                    best_score = s
+                    best_rc = np.array([float(r), float(c)], dtype=float)
+
+        self.center = (1 - self.center_alpha) * self.center + self.center_alpha * best_rc
+        self.last_score = float(best_score)
+        if scores:
+            med = float(np.median(scores))
+            mad = float(np.median(np.abs(np.array(scores) - med))) + 1e-6
+            z = (float(best_score) - med) / mad
+            # Squash to [0,1] for UI; 0~no separation, 1~very confident.
+            self.last_confidence = float(1.0 / (1.0 + np.exp(-0.6 * (z - 2.0))))
+        else:
+            self.last_confidence = None
+        return float(self.center[0]), float(self.center[1]), self.dx, self.dy
+
+
+class CenterAlignedPersistence:
+    """
+    Maintain a long-memory map in a center-aligned frame.
+
+    This is the simplest way to 'remember' all 4 arms: align each frame by the
+    estimated cross center, then take a leaky max (or EMA) over time.
+    """
+
+    def __init__(self, ref_center=(15.5, 15.5), decay=0.995, mode="leaky_max"):
+        self.ref_center = np.array(ref_center, dtype=float)
+        self.decay = decay
+        self.mode = mode
+        self.state = None
+
+    def reset(self):
+        self.state = None
+
+    def update(self, grid, center_rc):
+        if center_rc is None or center_rc[0] is None or center_rc[1] is None:
+            return self.state
+        center = np.array([center_rc[0], center_rc[1]], dtype=float)
+        shift = self.ref_center - center
+        aligned = ndimage.shift(
+            grid,
+            shift=(float(shift[0]), float(shift[1])),
+            order=1,
+            mode="constant",
+            cval=0.0,
+            prefilter=False,
+        )
+        if self.state is None:
+            self.state = aligned
+        else:
+            if self.mode == "ema":
+                alpha = 1.0 - self.decay
+                self.state = (1 - alpha) * self.state + alpha * aligned
+            else:
+                self.state = np.maximum(self.state * self.decay, aligned)
+        return self.state
+
+
+def visualize_cross_center_with_memory(
+    df,
+    t_start,
+    window_size=0.2,
+    processor=None,
+    cross_tracker=None,
+    memory=None,
+):
+    """
+    Visualize: current activity, inferred cross center/arms, and the center-aligned
+    persistence map (should show all 4 arms over time).
+    """
+    if processor is None:
+        processor = SignalProcessor()
+    if cross_tracker is None:
+        cross_tracker = CrossMatchedFilterTracker()
+    if memory is None:
+        memory = CenterAlignedPersistence()
+
+    grid = compute_power_grid(df, t_start, window_size, processor)
+    est_row, est_col, dx, dy = cross_tracker.update(grid)
+    mem = memory.update(grid, (est_row, est_col))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    axes[0].imshow(grid, cmap="hot", aspect="equal")
+    axes[0].set_title(f"Current Activity (t={t_start:.2f}s)")
+    if est_row is not None and dx is not None and dy is not None:
+        cr, cc = est_row, est_col
+        axes[0].scatter([cc], [cr], c="cyan", s=140, marker="*", linewidths=1.5)
+        arms = [
+            (cr, cc + dx),
+            (cr, cc - dx),
+            (cr + dy, cc),
+            (cr - dy, cc),
+        ]
+        for (r, c) in arms:
+            axes[0].scatter([c], [r], c="lime", s=80, marker="o", edgecolors="black")
+    axes[0].set_xlabel("Col")
+    axes[0].set_ylabel("Row")
+
+    if mem is not None:
+        axes[1].imshow(mem, cmap="hot", aspect="equal")
+        axes[1].set_title("Center-Aligned Persistence (memory)")
+    else:
+        axes[1].text(0.5, 0.5, "No memory yet", ha="center", va="center")
+        axes[1].set_title("Center-Aligned Persistence (memory)")
+    axes[1].set_xlabel("Col")
+    axes[1].set_ylabel("Row")
+
+    plt.tight_layout()
+    return fig
+
+
+def track_cross_center_over_time(
+    df,
+    ground_truth,
+    tracker,
+    cross_tracker=None,
+    t_start=0,
+    t_end=30,
+    window_size=0.2,
+    step=0.1,
+    processor=None,
+):
+    if processor is None:
+        processor = SignalProcessor()
+    if cross_tracker is None:
+        cross_tracker = CrossMatchedFilterTracker()
+
+    times = np.arange(t_start, t_end - window_size, step)
+    gt_time = _get_gt_time_array(ground_truth)
+
+    results = {
+        "time": [],
+        "est_row": [],
+        "est_col": [],
+        "true_row": [],
+        "true_col": [],
+        "dx": [],
+        "dy": [],
+    }
+
+    for t in times:
+        power = compute_power_grid(df, t, window_size, processor)
+        est_row, est_col, dx, dy = cross_tracker.update(power)
+
+        gt_idx = np.abs(gt_time - t).argmin()
+        true_row, true_col, _ = compute_ground_truth_center(ground_truth, gt_idx)
+
+        results["time"].append(t)
+        results["est_row"].append(est_row if est_row is not None else np.nan)
+        results["est_col"].append(est_col if est_col is not None else np.nan)
+        results["true_row"].append(true_row if true_row is not None else np.nan)
+        results["true_col"].append(true_col if true_col is not None else np.nan)
+        results["dx"].append(dx if dx is not None else np.nan)
+        results["dy"].append(dy if dy is not None else np.nan)
+
+    return pd.DataFrame(results)
+
+
+def track_directional_centers_over_time(
+    df,
+    ground_truth,
+    tracker,
+    accumulator=None,
+    t_start=0,
+    t_end=30,
+    window_size=0.2,
+    step=0.1,
+    processor=None,
+):
+    """
+    Track direction-accumulated center over time and compare to ground truth.
+
+    Uses ground truth vx/vy to gate updates (dev only). Direction maps are only
+    updated when an axis dominates to avoid mixing vx/vy regions.
+    """
+    if processor is None:
+        processor = SignalProcessor()
+    if accumulator is None:
+        accumulator = DirectionalAccumulator()
+
+    times = np.arange(t_start, t_end - window_size, step)
+    gt_time = _get_gt_time_array(ground_truth)
+
+    results = {
+        "time": [],
+        "est_row": [],
+        "est_col": [],
+        "true_row": [],
+        "true_col": [],
+        "vx": [],
+        "vy": [],
+    }
+
+    for t in times:
+        power = compute_power_grid(df, t, window_size, processor)
+
+        gt_idx = np.abs(gt_time - t).argmin()
+        vx = ground_truth["vx"].iloc[gt_idx] if "vx" in ground_truth.columns else None
+        vy = ground_truth["vy"].iloc[gt_idx] if "vy" in ground_truth.columns else None
+
+        accumulator.update(power, vx, vy)
+        est_row, est_col, _ = accumulator.estimate_center(tracker)
+
+        true_row, true_col, _ = compute_ground_truth_center(ground_truth, gt_idx)
+
+        results["time"].append(t)
+        results["est_row"].append(est_row if est_row is not None else np.nan)
+        results["est_col"].append(est_col if est_col is not None else np.nan)
+        results["true_row"].append(true_row if true_row is not None else np.nan)
+        results["true_col"].append(true_col if true_col is not None else np.nan)
+        results["vx"].append(vx if vx is not None else np.nan)
+        results["vy"].append(vy if vy is not None else np.nan)
+
+    return pd.DataFrame(results)
+
+
+def plot_center_comparison(results):
+    """Plot estimated vs ground truth center over time."""
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+
+    axes[0].plot(results["time"], results["true_col"], label="True center col", alpha=0.7)
+    axes[0].plot(results["time"], results["est_col"], label="Estimated center col", alpha=0.7)
+    axes[0].set_ylabel("Column (0-31)")
+    axes[0].set_title("Center Column Tracking")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(results["time"], results["true_row"], label="True center row", alpha=0.7)
+    axes[1].plot(results["time"], results["est_row"], label="Estimated center row", alpha=0.7)
+    axes[1].set_xlabel("Time (s)")
+    axes[1].set_ylabel("Row (0-31)")
+    axes[1].set_title("Center Row Tracking")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    col_err = np.nanmean(np.abs(results["est_col"] - results["true_col"]))
+    row_err = np.nanmean(np.abs(results["est_row"] - results["true_row"]))
+
+    return fig, row_err, col_err
 
 
 def plot_tracking_comparison(tracking_results):
@@ -679,7 +1739,8 @@ if __name__ == "__main__":
         highcut=150,
         ema_alpha=0.1,
         spatial_sigma=1.0,
-        envelope_method='hilbert'
+        envelope_method='hilbert',
+        grid_transform="rot180",
     )
     
     # Initialize tracker
@@ -688,7 +1749,7 @@ if __name__ == "__main__":
     print("\nHotspotTracker initialized!")
     
     # Test single frame detection
-    print("\n[1/3] Testing hotspot detection at t=5s...")
+    print("\n[1/5] Testing hotspot detection at t=5s...")
     fig1, hotspots, center, vel = visualize_hotspot_detection(
         neural_data, tracker, t_start=5.0, processor=processor
     )
@@ -699,7 +1760,7 @@ if __name__ == "__main__":
     plt.show()
     
     # Track over time
-    print("\n[2/3] Tracking hotspots over 30 seconds...")
+    print("\n[2/5] Tracking hotspots over 30 seconds...")
     tracking_results = track_hotspots_over_time(
         neural_data, ground_truth, tracker, t_start=0, t_end=30, processor=processor
     )
@@ -712,10 +1773,58 @@ if __name__ == "__main__":
     print(f"    Vy: {corr_vy:.3f}")
     plt.show()
     
+    # Cross center tracking (neural-only; solves center from 2-of-4 arms)
+    print("\n[3/5] Tracking cross center over 30 seconds...")
+    cross_tracker = CrossMatchedFilterTracker(
+        search_radius=6,
+        center_alpha=0.6,
+        fixed_dx=6.0,
+        fixed_dy=6.0,
+        patch_radius=3,
+        patch_sigma=1.25,
+    )
+    center_results = track_cross_center_over_time(
+        neural_data,
+        ground_truth,
+        tracker,
+        cross_tracker=cross_tracker,
+        t_start=0,
+        t_end=30,
+        processor=processor,
+    )
+    fig3, row_err, col_err = plot_center_comparison(center_results)
+    print(f"  Mean abs error: row={row_err:.2f}, col={col_err:.2f} (grid units)")
+    plt.show()
+
+    print("\n[4/5] Visualizing center-aligned memory map...")
+    cross_tracker2 = CrossMatchedFilterTracker(
+        search_radius=6,
+        center_alpha=0.6,
+        fixed_dx=6.0,
+        fixed_dy=6.0,
+        patch_radius=3,
+        patch_sigma=1.25,
+    )
+    memory = CenterAlignedPersistence(ref_center=(15.5, 15.5), decay=0.997, mode="leaky_max")
+    # Warm up the memory for a few seconds to show all 4 arms.
+    for t in np.arange(0, 10.0, 0.1):
+        grid = compute_power_grid(neural_data, float(t), 0.2, processor)
+        est_row, est_col, _dx, _dy = cross_tracker2.update(grid)
+        memory.update(grid, (est_row, est_col))
+    fig4 = visualize_cross_center_with_memory(
+        neural_data,
+        t_start=18.1,
+        window_size=0.2,
+        processor=processor,
+        cross_tracker=cross_tracker2,
+        memory=memory,
+    )
+    plt.show()
+
     # Animation
-    print("\n[3/3] Creating animated visualization...")
+    print("\n[5/5] Creating animated visualization...")
     print("  Close the plot window when done viewing.")
-    fig3, anim = animate_hotspot_tracking(
+    fig5, anim = animate_hotspot_tracking(
         neural_data, ground_truth, tracker, t_start=0, t_end=20, fps=10, processor=processor
     )
     plt.show()

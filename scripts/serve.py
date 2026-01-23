@@ -69,7 +69,7 @@ class WebViewerServer:
         )
         console.print()
         console.print(
-            "[dim]Note: Web clients connect directly to the data stream at ws://localhost:8765[/dim]"
+            "[dim]Note: This UI expects the compass backend at ws://localhost:8767 (run brainstorm-compass).[/dim]"
         )
         console.print()
 
