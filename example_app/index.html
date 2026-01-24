@@ -1,102 +1,117 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Compass HUD</title>
-    <link rel="stylesheet" href="style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-</head>
-<body>
-    <div class="hud">
-        <header class="topbar">
-            <div class="brand">
-                <div class="brand-mark" aria-hidden="true"></div>
-                <div class="brand-text">
-                    <div class="brand-title">COMPASS</div>
-                    <div class="brand-subtitle">Array placement guidance</div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Compass | OR Guidance</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700;800&family=Spline+Sans+Mono:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="mast">
+        <div class="mast-left">
+          <div class="brand" aria-label="Compass">
+            <div class="brand-mark" aria-hidden="true"></div>
+            <div>
+              <div class="brand-name">Compass</div>
+              <div class="brand-tag">Array placement guidance</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mast-mid">
+          <div class="state acquiring" id="state-chip" aria-live="polite">
+            <span class="dot" id="status-indicator" aria-hidden="true"></span>
+            <span id="status-text">DISCONNECTED</span>
+          </div>
+        </div>
+
+        <div class="mast-right" aria-label="Readouts">
+          <div class="ro">
+            <div class="ro-label">Time</div>
+            <div class="ro-val" id="time-display">0.00s</div>
+          </div>
+          <div class="ro">
+            <div class="ro-label">Confidence</div>
+            <div class="ro-val" id="confidence-display">--</div>
+          </div>
+          <div class="ro">
+            <div class="ro-label">Distance</div>
+            <div class="ro-val" id="distance-display">--</div>
+          </div>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card guidance" aria-label="Guidance">
+          <div class="dial-wrap" id="dial-wrap">
+            <div class="dial" aria-hidden="true">
+              <div class="dial-inner"></div>
+              <div class="needle" id="needle"></div>
+              <div class="dial-center">
+                <div class="lock-badge" id="lock">
+                  <div>
+                    <div class="lock-title">On Target</div>
+                    <div class="lock-sub">Hold position</div>
+                  </div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="command" aria-label="Command">
+            <div class="cmd-main" id="move-text">ACQUIRING…</div>
+            <div class="cmd-sub">
+              <div>Offset <strong id="offset-display">—</strong></div>
+              <div>Quality <strong id="quality-display">—</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="card diag" aria-label="Diagnostics">
+          <div class="diag-title">
+            <h2>Maps</h2>
+            <div class="tiny">Live signal + accumulated memory</div>
+          </div>
+
+          <div class="maps">
+            <div class="map" aria-label="Live map">
+              <div class="map-top">
+                <div class="map-label">Live</div>
+                <div class="map-hint">center + anchors</div>
+              </div>
+              <canvas id="heatmap-canvas" width="320" height="320"></canvas>
             </div>
 
-            <div class="status">
-                <div class="pill" id="connection-pill">
-                    <span class="dot" id="status-indicator"></span>
-                    <span id="status-text">DISCONNECTED</span>
-                </div>
-                <div class="pill subtle">
-                    <span class="label">t</span>
-                    <span class="value" id="time-display">0.00s</span>
-                </div>
-                <div class="pill subtle">
-                    <span class="label">conf</span>
-                    <span class="value" id="confidence-display">0%</span>
-                </div>
-                <div class="pill subtle">
-                    <span class="label">dist</span>
-                    <span class="value" id="distance-display">--</span>
-                </div>
+            <div class="map" aria-label="Memory map">
+              <div class="map-top">
+                <div class="map-label">Memory</div>
+                <div class="map-hint">stable cluster parts</div>
+              </div>
+              <canvas id="memory-canvas" width="320" height="320"></canvas>
             </div>
-        </header>
+          </div>
+        </aside>
+      </main>
 
-        <main class="layout">
-            <section class="compass" aria-label="Guidance">
-                <div class="compass-frame">
-                    <div class="ring" aria-hidden="true"></div>
-                    <div class="ring ring2" aria-hidden="true"></div>
-                    <div class="crosshair" aria-hidden="true"></div>
-
-                    <div class="arrow" id="arrow">
-                        <div class="arrow-shaft" aria-hidden="true"></div>
-                        <div class="arrow-head" aria-hidden="true"></div>
-                    </div>
-
-                    <div class="lock" id="lock">
-                        <div class="lock-title">LOCKED</div>
-                        <div class="lock-sub">Hold position</div>
-                    </div>
-                </div>
-
-                <div class="readout">
-                    <div class="readout-row">
-                        <div class="readout-label">MOVE</div>
-                        <div class="readout-value" id="move-display">--</div>
-                    </div>
-                    <div class="meter">
-                        <div class="meter-bar" id="confidence-bar"></div>
-                    </div>
-                    <div class="readout-foot">
-                        <span id="mode-text">SEARCHING</span>
-                    </div>
-                </div>
-            </section>
-
-            <section class="maps" aria-label="Maps">
-                <div class="map-card">
-                    <div class="map-title">LIVE</div>
-                    <canvas id="heatmap-canvas" width="320" height="320"></canvas>
-                </div>
-                <div class="map-card">
-                    <div class="map-title">MEMORY</div>
-                    <canvas id="memory-canvas" width="320" height="320"></canvas>
-                </div>
-            </section>
-        </main>
-
-        <footer class="bottombar">
-            <div class="controls">
-                <label class="ctl-label" for="server-url">Backend WS</label>
-                <input type="text" id="server-url" value="ws://localhost:8767">
-                <button id="connect-btn">CONNECT</button>
-                <button id="reset-btn" class="ghost">RESET</button>
-            </div>
-            <div class="hint">
-                Use arrow keys in the control client. This display is read-only.
-            </div>
-        </footer>
+      <footer class="bar">
+        <div class="controls">
+          <label for="server-url">Backend WS</label>
+          <input type="text" id="server-url" value="ws://localhost:8767" />
+          <button class="primary" id="connect-btn">Connect</button>
+          <button class="ghost" id="reset-btn">Reset</button>
+        </div>
+        <div class="footnote">Reset clears tracking memory for clean re-acquisition.</div>
+      </footer>
     </div>
 
     <script src="app.js"></script>
-</body>
+  </body>
 </html>
+

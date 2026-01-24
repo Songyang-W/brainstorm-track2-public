@@ -8,9 +8,9 @@ This plan targets the Clinical Operator persona in `docs/user_persona.md` and th
 
 ## Core Mental Model
 
-The tuned region appears as a cross of four directional sub-regions (Vx+/Vx-/Vy+/Vy-) that only partially light up at any moment. The UI should:
-1. Estimate the *cross center* (the placement target) from streaming neural data.
-2. Show a single dominant guidance vector: where to move the array to center the cross.
+The tuned region appears as a cluster of direction-dependent sub-regions that only partially light up at any moment. The UI should:
+1. Estimate the *stable cluster center* (the placement target) from streaming neural data.
+2. Show a single dominant guidance vector: where to move the array to center the cluster.
 3. Communicate certainty and signal quality.
 
 ## Screen Layout (Single Screen, No Tabs)
@@ -18,11 +18,11 @@ The tuned region appears as a cross of four directional sub-regions (Vx+/Vx-/Vy+
 ### A) Primary Guidance (Center Stage)
 - **Big Compass Arrow**: points in the direction the surgeon should move the array.
 - **Distance Ring**: radial meter showing how far the estimated center is from the array midpoint.
-- **LOCK State**: when "close enough" and confidence is high, replace arrow with a large "LOCKED" glyph + steady green ring.
+- **ON TARGET State**: when "close enough" and confidence is high, replace arrow with a large "ON TARGET" badge + steady green ring.
 
 ### B) Context (Secondary, Still Glanceable)
-- **Live Heatmap (32x32)**: current high-gamma power map, with cross-center marker and predicted arm markers.
-- **Memory Heatmap**: center-aligned persistence view that accumulates the cross arms over time (shows the stable shape).
+- **Live Heatmap (32x32)**: current high-gamma power map, with center marker and peak overlays.
+- **Memory Heatmap**: persistence view that accumulates cluster parts over time (shows the stable shape, including parts that are currently off).
 
 ### C) Operator Status Strip (Top/Bottom Bar)
 - Connection state (Connected / Buffering / Disconnected)
@@ -37,7 +37,8 @@ The tuned region appears as a cross of four directional sub-regions (Vx+/Vx-/Vy+
 No UI controls during active use beyond:
 - Server URL field (setup only)
 - "Connect" button
-- Optional "Reset" button (clears accumulation and re-centers tracking)
+- "Reset" button (clears accumulation and re-centers tracking)
+  - Implementation detail: sends `{"type":"reset"}` to the backend when connected.
 
 Everything else is read-only and big.
 
@@ -57,7 +58,7 @@ Trigger: confidence < threshold for N frames OR no stable estimate.
 
 ### 3) Locked (Found It)
 - Screen simplifies:
-  - center shows "LOCKED" + steady green ring
+  - center shows "ON TARGET" + steady green ring
   - arrow disappears
 - Optional small "Hold" timer indicating stability duration
 
@@ -96,10 +97,11 @@ Industrial + clinical:
 Frontend expects `type: "compass_frame"` messages:
 - `t_s`
 - `center_row`, `center_col`
-- `dx`, `dy`
 - `confidence` (0..1)
 - `distance` (grid units)
 - `move_row`, `move_col` (normalized -1..1)
+- `spots` (list of `[row, col, weight]`, optional)
+- `spots_mem` (list of `[row, col, weight]` in memory/template coords, optional)
 - `heatmap` (32x32 float array, optional)
 - `memory` (32x32 float array, optional)
 
@@ -108,4 +110,3 @@ Frontend expects `type: "compass_frame"` messages:
 - Default font sizes assume distance viewing.
 - Avoid tiny legends; use a small number of labels, always in the same place.
 - Use motion only to communicate state changes (lock acquisition, confidence collapse), never decorative.
-

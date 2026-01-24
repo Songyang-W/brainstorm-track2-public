@@ -30,7 +30,7 @@ from rich.panel import Panel
 from scipy.ndimage import gaussian_filter
 from scipy.signal import butter, iirnotch, sosfilt, tf2sos
 
-from scripts.hotspot_tracker import CenterAlignedPersistence, CrossMatchedFilterTracker
+from scripts.hotspot_tracker import ClusterTemplateTracker
 
 app = typer.Typer(help="Realtime processing backend for the OR 'Compass' UI")
 console = Console()
@@ -93,17 +93,38 @@ class CompassProcessor:
         self.ema = np.zeros((self.n_channels,), dtype=np.float32)
         self._last_t: float | None = None
 
-        self.cross = CrossMatchedFilterTracker(
+        self.cluster = ClusterTemplateTracker(
+            grid_size=self.grid_size,
             search_radius=10,
-            center_alpha=0.6,
-            fixed_dx=6.0,
-            fixed_dy=6.0,
-            patch_radius=3,
-            patch_sigma=1.6,
-            global_search=False,
-        )
-        self.memory = CenterAlignedPersistence(
-            ref_center=(15.5, 15.5), decay=0.997, mode="leaky_max"
+            shift_alpha=0.35,
+            template_half_life_s=18.0,
+            presence_half_life_s=60.0,
+            presence_gain=0.06,
+            update_percentile=92.0,
+            centroid_power=1.2,
+            min_update_pixels=16,
+            max_update_pixels=64,
+            roi_radius=13.0,
+            peak_suppress_radius=5,
+            frame_n_peaks=10,
+            peak_min_rel=0.55,
+            peak_abs_min=0.18,
+            update_blob_sigma=1.0,
+            update_min_rel=0.55,
+            update_dog_small_sigma=0.6,
+            update_dog_large_sigma=1.6,
+            update_dog_large_scale=0.65,
+            update_max_filter_size=5,
+            exclude_center_radius=2.2,
+            center_percentile=92.0,
+            center_min_rel=0.55,
+            min_update_conf=0.45,
+            presence_floor=0.02,
+            anchor_max=8,
+            anchor_percentile=99.0,
+            anchor_min_rel=0.85,
+            anchor_min_size=14,
+            anchor_keep_rel=0.82,
         )
 
     def process_batch(self, batch: np.ndarray, t_s: float) -> dict[str, Any] | None:
@@ -139,7 +160,7 @@ class CompassProcessor:
         grid = _reshape_to_grid(z, self.grid_size)
         grid = gaussian_filter(grid, sigma=self.spatial_sigma)
 
-        cr, cc, dx, dy = self.cross.update(grid)
+        cr, cc, memory = self.cluster.update(grid, dt_s=dt)
         if cr is None or cc is None:
             return None
 
@@ -150,22 +171,31 @@ class CompassProcessor:
         move_c = float(-delta_c / mid)
         dist = float(np.hypot(delta_r, delta_c))
 
-        mem = self.memory.update(grid, (cr, cc))
+        mem = memory
+        spots = self.cluster.top_spots_live(n_peaks=8)
+        spots_mem = self.cluster.top_spots_memory(n_peaks=8)
 
         return {
             "t_s": float(t_s),
             "center_row": float(cr),
             "center_col": float(cc),
-            "dx": float(dx),
-            "dy": float(dy),
-            "confidence": float(self.cross.last_confidence or 0.0),
+            "confidence": float(self.cluster.last_confidence or 0.0),
             "distance": dist,
             "move_row": move_r,
             "move_col": move_c,
+            "spots": [[float(r), float(c), float(v)] for (r, c, v) in spots],
+            "spots_mem": [[float(r), float(c), float(v)] for (r, c, v) in spots_mem],
             # JSON-friendly payload (32x32 is small enough for local UI at ~15 Hz).
             "heatmap": grid.astype(np.float32).tolist(),
             "memory": None if mem is None else mem.astype(np.float32).tolist(),
         }
+
+    def reset(self) -> None:
+        """Reset all causal state (filters, EMA, and cluster memory)."""
+        self.fb = _make_filterbank(self.fs, self.n_channels)
+        self.ema[:] = 0.0
+        self._last_t = None
+        self.cluster.reset()
 
 
 class CompassServer:
@@ -176,12 +206,16 @@ class CompassServer:
         port: int,
         ui_hz: float,
         include_heatmaps: bool,
+        ema_tau_s: float,
+        spatial_sigma: float,
     ):
         self.stream_url = stream_url
         self.host = host
         self.port = port
         self.ui_hz = ui_hz
         self.include_heatmaps = include_heatmaps
+        self.ema_tau_s = float(ema_tau_s)
+        self.spatial_sigma = float(spatial_sigma)
         self.clients: set[websockets.WebSocketServerProtocol] = set()
         self.processor: CompassProcessor | None = None
         self._last_send = 0.0
@@ -205,8 +239,14 @@ class CompassServer:
     async def ws_handler(self, ws: websockets.WebSocketServerProtocol) -> None:
         await self.register(ws)
         try:
-            async for _msg in ws:
-                pass
+            async for msg in ws:
+                try:
+                    data = json.loads(msg)
+                except Exception:
+                    continue
+                if data.get("type") == "reset" and self.processor is not None:
+                    self.processor.reset()
+                    await ws.send(json.dumps({"type": "ack", "ok": True, "action": "reset"}))
         finally:
             await self.unregister(ws)
 
@@ -230,7 +270,11 @@ class CompassServer:
                             grid_size = int(data.get("grid_size", 32))
                             n_channels = len(data.get("channels_coords", [])) or 1024
                             self.processor = CompassProcessor(
-                                fs=fs, n_channels=n_channels, grid_size=grid_size
+                                fs=fs,
+                                n_channels=n_channels,
+                                grid_size=grid_size,
+                                ema_tau_s=self.ema_tau_s,
+                                spatial_sigma=self.spatial_sigma,
                             )
                         elif data.get("type") == "sample_batch" and self.processor is not None:
                             batch = np.asarray(data["neural_data"], dtype=np.float32)
@@ -283,6 +327,12 @@ def main(
     heatmaps: bool = typer.Option(
         True, "--heatmaps/--no-heatmaps", help="Send heatmap + memory arrays"
     ),
+    ema_tau_s: float = typer.Option(
+        0.35, help="Temporal smoothing (EMA time constant, seconds)"
+    ),
+    spatial_sigma: float = typer.Option(
+        1.0, help="Spatial Gaussian smoothing sigma (grid units)"
+    ),
 ) -> None:
     """Run the realtime compass processing backend."""
     server = CompassServer(
@@ -291,6 +341,8 @@ def main(
         port=port,
         ui_hz=ui_hz,
         include_heatmaps=heatmaps,
+        ema_tau_s=ema_tau_s,
+        spatial_sigma=spatial_sigma,
     )
     asyncio.run(server.run())
 

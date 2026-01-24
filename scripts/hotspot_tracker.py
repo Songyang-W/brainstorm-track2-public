@@ -1386,6 +1386,443 @@ class CenterAlignedPersistence:
         return self.state
 
 
+def _shift2d_int(arr: np.ndarray, dr: int, dc: int, fill: float = 0.0) -> np.ndarray:
+    """Integer shift with zero padding (no wrap). dr/dc are in array coordinates."""
+    out = np.full_like(arr, fill, dtype=float)
+    h, w = arr.shape
+
+    r_src1 = max(0, -dr)
+    r_src2 = min(h, h - dr)  # exclusive
+    r_dst1 = max(0, dr)
+    r_dst2 = r_dst1 + (r_src2 - r_src1)
+
+    c_src1 = max(0, -dc)
+    c_src2 = min(w, w - dc)
+    c_dst1 = max(0, dc)
+    c_dst2 = c_dst1 + (c_src2 - c_src1)
+
+    if r_src2 <= r_src1 or c_src2 <= c_src1:
+        return out
+
+    out[r_dst1:r_dst2, c_dst1:c_dst2] = arr[r_src1:r_src2, c_src1:c_src2]
+    return out
+
+
+class ClusterTemplateTracker:
+    """
+    Track an arbitrary cluster with explicit memory, without assuming 4 fixed arms.
+
+    Maintains a template ("memory map") in a centered coordinate frame. Each frame:
+    - find the integer translation that best aligns the template to the current grid
+      (within a search radius)
+    - shift current grid into the template frame and update the template with a leaky-max
+      (only using the brightest part of the current frame to avoid accumulating noise)
+
+    The reported center is the stable centroid of the template (in live grid coords),
+    so it stays consistent even when subsets of the cluster turn off.
+    """
+
+    def __init__(
+        self,
+        grid_size: int = 32,
+        search_radius: int = 10,
+        shift_alpha: float = 0.35,
+        # "template" is used primarily for alignment; keep a moderate half-life.
+        template_half_life_s: float = 20.0,
+        # "presence" is the long-memory map used for stable center/spots.
+        presence_half_life_s: float = 60.0,
+        presence_gain: float = 0.10,
+        update_percentile: float = 92.0,
+        centroid_power: float = 1.2,
+        min_update_pixels: int = 16,
+        max_update_pixels: int = 64,
+        roi_radius: float | None = 14.0,
+        peak_suppress_radius: int = 5,
+        frame_n_peaks: int = 12,
+        peak_min_rel: float = 0.55,
+        peak_abs_min: float = 0.18,
+        update_blob_sigma: float = 1.2,
+        update_min_rel: float = 0.55,
+        update_dog_small_sigma: float = 0.6,
+        update_dog_large_sigma: float = 1.6,
+        update_dog_large_scale: float = 0.65,
+        update_max_filter_size: int = 5,
+        exclude_center_radius: float = 2.2,
+        center_percentile: float = 92.0,
+        center_min_rel: float = 0.55,
+        min_update_conf: float = 0.45,
+        presence_floor: float = 0.02,
+        anchor_max: int = 8,
+        anchor_percentile: float = 99.0,
+        anchor_min_rel: float = 0.85,
+        anchor_min_size: int = 14,
+        anchor_keep_rel: float = 0.82,
+    ):
+        self.grid_size = grid_size
+        self.mid = (grid_size - 1) / 2.0
+        self.search_radius = search_radius
+        self.shift_alpha = shift_alpha
+        self.template_half_life_s = float(template_half_life_s)
+        self.presence_half_life_s = float(presence_half_life_s)
+        self.presence_gain = float(presence_gain)
+        self.update_percentile = update_percentile
+        self.centroid_power = centroid_power
+        self.min_update_pixels = min_update_pixels
+        self.max_update_pixels = int(max_update_pixels)
+        self.roi_radius = roi_radius
+        self.peak_suppress_radius = int(peak_suppress_radius)
+        self.frame_n_peaks = int(frame_n_peaks)
+        self.peak_min_rel = float(peak_min_rel)
+        self.peak_abs_min = float(peak_abs_min)
+        self.update_blob_sigma = float(update_blob_sigma)
+        self.update_min_rel = float(update_min_rel)
+        self.update_dog_small_sigma = float(update_dog_small_sigma)
+        self.update_dog_large_sigma = float(update_dog_large_sigma)
+        self.update_dog_large_scale = float(update_dog_large_scale)
+        self.update_max_filter_size = int(update_max_filter_size)
+        self.exclude_center_radius = float(exclude_center_radius)
+        self.center_percentile = float(center_percentile)
+        self.center_min_rel = float(center_min_rel)
+        self.min_update_conf = float(min_update_conf)
+        self.presence_floor = float(presence_floor)
+        self.anchor_max = int(anchor_max)
+        self.anchor_percentile = float(anchor_percentile)
+        self.anchor_min_rel = float(anchor_min_rel)
+        self.anchor_min_size = int(anchor_min_size)
+        self.anchor_keep_rel = float(anchor_keep_rel)
+
+        self.template: np.ndarray | None = None
+        self.presence: np.ndarray | None = None
+        self.shift = np.array([0.0, 0.0], dtype=float)  # (dr, dc) relative to mid
+        self.last_confidence: float | None = None
+
+    def reset(self):
+        self.template = None
+        self.presence = None
+        self.shift[:] = 0.0
+        self.last_confidence = None
+
+    def _decay_from_half_life(self, half_life_s: float, dt_s: float) -> float:
+        # Half-life decay: value *= 0.5 ** (dt / half_life)
+        hl = max(1e-3, float(half_life_s))
+        dt = max(0.0, float(dt_s))
+        return float(0.5 ** (dt / hl))
+
+    def _normalize_frame(self, grid: np.ndarray) -> np.ndarray:
+        g = np.maximum(grid.astype(float), 0.0)
+        # Per-frame scale normalization makes alignment + memory robust across sessions
+        # and across amplitude drift (esp. medium/hard).
+        scale = float(np.percentile(g, 99.5)) + 1e-6
+        g = np.clip(g / scale, 0.0, 1.0)
+        return g
+
+    def _centroid(self, weights: np.ndarray) -> np.ndarray | None:
+        w = np.maximum(weights, 0.0).astype(float)
+        if self.centroid_power != 1.0:
+            w = w ** self.centroid_power
+        total = float(w.sum())
+        if total <= 0:
+            return None
+        rows, cols = np.indices(w.shape)
+        r = float((rows * w).sum() / total)
+        c = float((cols * w).sum() / total)
+        return np.array([r, c], dtype=float)
+
+    def _score_shift(self, grid: np.ndarray, dr: int, dc: int) -> float:
+        # Score = normalized dot product (cosine similarity) between grid and shifted template.
+        assert self.template is not None
+        t_shift = _shift2d_int(self.template, dr, dc, fill=0.0)
+        num = float(np.sum(grid * t_shift))
+        den = float(np.sqrt(np.sum(grid * grid) * np.sum(t_shift * t_shift))) + 1e-9
+        return num / den
+
+    def _best_shift(self, grid: np.ndarray) -> tuple[np.ndarray, float]:
+        # Search around previous shift (integerized) to find best translation.
+        base = np.round(self.shift).astype(int)
+        scores = []
+        best_score = float("-inf")
+        best = base.copy()
+        for dr in range(base[0] - self.search_radius, base[0] + self.search_radius + 1):
+            for dc in range(base[1] - self.search_radius, base[1] + self.search_radius + 1):
+                s = self._score_shift(grid, int(dr), int(dc))
+                scores.append(s)
+                if s > best_score:
+                    best_score = s
+                    best[:] = (dr, dc)
+
+        med = float(np.median(scores))
+        mad = float(np.median(np.abs(np.array(scores) - med))) + 1e-6
+        z = (best_score - med) / mad
+        # Squash to [0,1]
+        conf = float(1.0 / (1.0 + np.exp(-0.7 * (z - 2.0))))
+        self.last_confidence = conf
+        return best.astype(float), best_score
+
+    def update(
+        self, grid: np.ndarray, dt_s: float = 1.0
+    ) -> tuple[float | None, float | None, np.ndarray | None]:
+        """
+        Args:
+            grid: 32x32 non-negative activity map (already filtered + normalized)
+            dt_s: Time delta since last update (seconds). Used to turn half-life
+                parameters into a consistent decay regardless of update rate.
+
+        Returns:
+            (center_row, center_col, memory_map)
+        """
+        g = self._normalize_frame(grid)
+
+        if self.template is None:
+            # Initialize template in centered frame (no shift).
+            self.template = g.copy()
+            # Presence starts as a conservative mask of the first frame.
+            thr0 = float(np.percentile(g, self.update_percentile))
+            mask0 = g >= thr0
+            if int(mask0.sum()) < self.min_update_pixels:
+                flat = g.ravel()
+                order = np.argsort(flat)[::-1]
+                k = min(self.min_update_pixels, order.size)
+                mask0 = np.zeros_like(flat, dtype=bool)
+                mask0[order[:k]] = True
+                mask0 = mask0.reshape(g.shape)
+            self.presence = mask0.astype(float)
+
+            centroid = self._centroid(self.presence)
+            if centroid is not None:
+                self.shift[:] = np.array([centroid[0] - self.mid, centroid[1] - self.mid])
+            return float(self.mid + self.shift[0]), float(self.mid + self.shift[1]), self.presence
+
+        best_shift, _best_score = self._best_shift(g)
+        # If alignment is uncertain, be conservative with shift updates to avoid drift.
+        conf = float(self.last_confidence or 0.0)
+        shift_alpha = self.shift_alpha if conf >= self.min_update_conf else (self.shift_alpha * 0.15)
+        self.shift = (1.0 - shift_alpha) * self.shift + shift_alpha * best_shift
+
+        # Align current frame into template coordinates by shifting by -best_shift.
+        aligned = _shift2d_int(g, int(-round(best_shift[0])), int(-round(best_shift[1])), fill=0.0)
+
+        # Build sparse update map from DoG local maxima (splits close blobs and avoids
+        # writing midpoint peaks into memory when only 2-of-4 are active).
+        a_small = ndimage.gaussian_filter(aligned, sigma=self.update_dog_small_sigma)
+        a_large = ndimage.gaussian_filter(aligned, sigma=self.update_dog_large_sigma)
+        dog = a_small - self.update_dog_large_scale * a_large
+        dog = np.maximum(dog, 0.0)
+
+        mx_d = float(np.max(dog))
+        thr = float(np.percentile(dog, self.update_percentile))
+        if mx_d > 0:
+            thr = max(thr, self.update_min_rel * mx_d, self.peak_abs_min)
+        maxima = dog == ndimage.maximum_filter(dog, size=self.update_max_filter_size)
+        mask = maxima & (dog >= thr)
+
+        if self.roi_radius is not None:
+            rr, cc = np.indices(aligned.shape)
+            roi = (rr - self.mid) ** 2 + (cc - self.mid) ** 2 <= float(self.roi_radius) ** 2
+            mask = mask & roi
+
+        upd_sparse = np.zeros_like(aligned, dtype=float)
+        if mask.any():
+            coords = np.argwhere(mask)
+            # Sort maxima by DoG score.
+            scores = dog[mask]
+            order = np.argsort(scores)[::-1]
+            taken: list[tuple[int, int]] = []
+            for idx in order:
+                r, c = map(int, coords[idx])
+                if len(taken) >= self.frame_n_peaks:
+                    break
+                # Do not write the cluster center itself into memory; we want memory to
+                # represent the parts of the cluster, not the midpoint between parts.
+                if (r - self.mid) ** 2 + (c - self.mid) ** 2 < self.exclude_center_radius ** 2:
+                    continue
+                ok = True
+                for (tr, tc) in taken:
+                    if (r - tr) ** 2 + (c - tc) ** 2 < float(self.peak_suppress_radius) ** 2:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                taken.append((r, c))
+                upd_sparse[r, c] = max(upd_sparse[r, c], float(aligned[r, c]))
+
+        if self.update_blob_sigma > 0 and float(upd_sparse.max()) > 0:
+            upd_sparse = ndimage.gaussian_filter(upd_sparse, sigma=self.update_blob_sigma)
+
+        # Fallback if peak-based update produced nothing (very weak / flat frame).
+        if float(upd_sparse.max()) <= 0:
+            thr = float(np.percentile(aligned, self.update_percentile))
+            mask = aligned >= thr
+            if int(mask.sum()) < self.min_update_pixels:
+                flat = aligned.ravel()
+                order = np.argsort(flat)[::-1]
+                k = min(self.min_update_pixels, order.size)
+                mask = np.zeros_like(flat, dtype=bool)
+                mask[order[:k]] = True
+                mask = mask.reshape(aligned.shape)
+            if self.roi_radius is not None:
+                rr, cc = np.indices(aligned.shape)
+                roi = (rr - self.mid) ** 2 + (cc - self.mid) ** 2 <= float(self.roi_radius) ** 2
+                mask = mask & roi
+            if int(mask.sum()) > self.max_update_pixels:
+                flat = (aligned * mask.astype(float)).ravel()
+                order = np.argsort(flat)[::-1]
+                k = min(self.max_update_pixels, order.size)
+                keep = np.zeros_like(flat, dtype=bool)
+                keep[order[:k]] = True
+                mask = keep.reshape(aligned.shape) & mask
+            upd_sparse = aligned * mask.astype(float)
+
+        if self.roi_radius is not None:
+            rr, cc = np.indices(upd_sparse.shape)
+            roi = (rr - self.mid) ** 2 + (cc - self.mid) ** 2 <= float(self.roi_radius) ** 2
+            upd_sparse = upd_sparse * roi.astype(float)
+
+        # Time-based decays (half-life parameters are more intuitive than per-tick decay).
+        tdec = self._decay_from_half_life(self.template_half_life_s, dt_s)
+        pdec = self._decay_from_half_life(self.presence_half_life_s, dt_s)
+
+        # Always decay; only incorporate new evidence when we're confident in alignment.
+        assert self.presence is not None
+        self.template = self.template * tdec
+        self.presence = self.presence * pdec
+        if conf >= self.min_update_conf:
+            # Template update: leaky-max for alignment robustness (use sparse map).
+            self.template = np.maximum(self.template, upd_sparse)
+
+            # Presence update: accumulate stable support over time (even if currently off).
+            umx = float(upd_sparse.max())
+            if umx > 0:
+                upd = np.clip(upd_sparse / (umx + 1e-6), 0.0, 1.0)
+            else:
+                upd = np.zeros_like(upd_sparse, dtype=float)
+            self.presence = np.clip(self.presence + self.presence_gain * upd, 0.0, 1.0)
+
+        if self.presence_floor > 0:
+            self.presence[self.presence < self.presence_floor] = 0.0
+
+        # Recenter template to keep its centroid near the grid midpoint; absorb the
+        # recentering into the accumulated shift so live coordinates remain consistent.
+        # Use the presence centroid for center stability.
+        pres_sm = ndimage.gaussian_filter(self.presence, sigma=1.0)
+        # Center from the *stable* part of the cluster (avoid low-level smear
+        # biasing the centroid when only subsets are active).
+        mx = float(np.max(pres_sm))
+        if mx > 0:
+            thr_c = float(np.percentile(pres_sm, self.center_percentile))
+            thr_c = max(thr_c, self.center_min_rel * mx)
+            mask_c = pres_sm >= thr_c
+            if int(mask_c.sum()) >= max(8, self.min_update_pixels // 2):
+                centroid = self._centroid(pres_sm * mask_c.astype(float))
+            else:
+                centroid = self._centroid(pres_sm)
+        else:
+            centroid = None
+        if centroid is None:
+            return None, None, self.presence
+        recenter = centroid - np.array([self.mid, self.mid], dtype=float)
+        if abs(float(recenter[0])) > 0.6 or abs(float(recenter[1])) > 0.6:
+            dr = int(round(float(recenter[0])))
+            dc = int(round(float(recenter[1])))
+            self.template = _shift2d_int(self.template, -dr, -dc, fill=0.0)
+            self.presence = _shift2d_int(self.presence, -dr, -dc, fill=0.0)
+            self.shift += np.array([dr, dc], dtype=float)
+            centroid = centroid - np.array([dr, dc], dtype=float)
+
+        # Stable center is the long-memory presence centroid + accumulated shift.
+        center_rc = centroid + self.shift
+        return float(center_rc[0]), float(center_rc[1]), self.presence
+
+    def _anchors_template(self, max_anchors: int | None = None) -> list[tuple[float, float, float]]:
+        """
+        Extract stable "anchor" points from the long-memory presence map in template coords.
+
+        Prefer connected components of the high-confidence core; fall back to local maxima.
+        """
+        if self.presence is None:
+            return []
+        p = ndimage.gaussian_filter(self.presence, sigma=1.0)
+        mx = float(np.max(p))
+        if mx <= 0:
+            return []
+
+        k = self.anchor_max if max_anchors is None else int(max_anchors)
+        thr = max(float(np.percentile(p, self.anchor_percentile)), self.anchor_min_rel * mx)
+        mask = p >= thr
+        labeled, num = ndimage.label(mask)
+
+        anchors: list[tuple[float, float, float]] = []
+        if num > 0:
+            sums = ndimage.sum(p, labeled, range(1, num + 1))
+            order = np.argsort(np.array(sums))[::-1]
+            for idx in order[: max(1, min(k, len(order)))]:
+                lab = int(idx) + 1
+                comp = labeled == lab
+                if int(comp.sum()) < self.anchor_min_size:
+                    continue
+                w = p * comp.astype(float)
+                centroid = self._centroid(w)
+                if centroid is None:
+                    continue
+                if (float(centroid[0]) - self.mid) ** 2 + (float(centroid[1]) - self.mid) ** 2 < self.exclude_center_radius ** 2:
+                    continue
+                # Weight = component peak value (for UI sizing).
+                peak = float(np.max(w))
+                anchors.append((float(centroid[0]), float(centroid[1]), peak))
+
+        # If components are insufficient, fill with local maxima (with suppression).
+        if len(anchors) < min(4, k):
+            peaks = extract_peak_observations(
+                p,
+                n_peaks=k,
+                smooth_sigma=0.5,
+                suppress_radius=self.peak_suppress_radius,
+                com_radius=2,
+            )
+            for (r, c, v) in peaks:
+                if len(anchors) >= k:
+                    break
+                if (float(r) - self.mid) ** 2 + (float(c) - self.mid) ** 2 < self.exclude_center_radius ** 2:
+                    continue
+                # Avoid duplicates near existing anchors.
+                ok = True
+                for (ar, ac, _av) in anchors:
+                    if (r - ar) ** 2 + (c - ac) ** 2 < float(self.peak_suppress_radius) ** 2:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                anchors.append((float(r), float(c), float(v)))
+
+        anchors.sort(key=lambda x: float(x[2]), reverse=True)
+        if anchors:
+            vmax = float(anchors[0][2])
+            kept = [a for a in anchors if float(a[2]) >= self.anchor_keep_rel * vmax]
+            # Ensure we always return at least a small set if we have any anchors.
+            anchors = kept if kept else anchors[: min(2, len(anchors))]
+        return anchors[:k]
+
+    def top_spots_live(self, n_peaks: int = 8) -> list[tuple[float, float, float]]:
+        """
+        Return top peaks from the long-memory presence map, transformed into live
+        grid coordinates. These are the "relevant bright spots" even if currently off.
+        """
+        peaks = self._anchors_template(max_anchors=n_peaks)
+        out = []
+        for (r, c, v) in peaks:
+            rr = float(r + self.shift[0])
+            cc = float(c + self.shift[1])
+            # Discard offscreen peaks rather than clamping (clamping creates
+            # artificial "edge peaks" when a spot is just outside the grid).
+            if rr < 0.0 or cc < 0.0 or rr > self.grid_size - 1.0 or cc > self.grid_size - 1.0:
+                continue
+            out.append((rr, cc, float(v)))
+        return out
+
+    def top_spots_memory(self, n_peaks: int = 8) -> list[tuple[float, float, float]]:
+        """Stable anchor points in the memory/template coordinate frame."""
+        return self._anchors_template(max_anchors=n_peaks)
+
+
 def visualize_cross_center_with_memory(
     df,
     t_start,
