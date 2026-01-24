@@ -82,8 +82,8 @@ class BCIServer:
         self.signal_pipeline = SignalPipeline(
             n_channels=self.n_channels,
             ema_alpha=0.1,
-            dead_threshold=1e-10,
-            artifact_std_multiplier=5.0,
+            dead_threshold=0,  # Disabled bad channel detection
+            artifact_std_multiplier=100.0,  # Effectively disabled
         )
 
         self.tracker = BCITracker(
@@ -196,17 +196,22 @@ class BCIServer:
                 # Process through signal pipeline
                 normalized, bad_channels = self.signal_pipeline.process(filtered)
 
-                # Update tracker and get guidance
-                tracking_result = self.tracker.update(normalized, bad_channels)
-
                 # Get ground truth for position tracking (dev mode)
                 gt_data = None
                 if self.ground_truth is not None:
                     gt_data = self._get_ground_truth(start_time_s)
 
-                # Update global mapper
+                # Update global mapper FIRST to get persistent_evidence
                 global_mapping = self.global_mapper.update(
                     normalized, bad_channels, start_time_s, ground_truth=gt_data
+                )
+
+                # Extract persistent_evidence for blended tracking
+                persistent_evidence = np.array(global_mapping["persistent_evidence"])
+
+                # Update tracker with persistent_evidence for robust tracking
+                tracking_result = self.tracker.update(
+                    normalized, bad_channels, persistent_evidence
                 )
 
                 # Build output message

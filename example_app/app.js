@@ -25,6 +25,13 @@ const globalCellSize = globalCanvasSize / 48;
 const globalMapSize = 96; // Full map size
 const globalDisplaySize = 48; // Downsampled for display
 
+// Velocity Graph Canvas
+let velocityCanvas = null;
+let velocityCtx = null;
+const velocityHistoryMax = 150; // ~5 seconds at 30fps
+let vxHistory = [];
+let vyHistory = [];
+
 // FPS tracking
 let frameCount = 0;
 let lastFpsUpdate = performance.now();
@@ -113,6 +120,181 @@ function initGlobalCanvas() {
     // Clear canvas
     globalCtx.fillStyle = '#0a0a0f';
     globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
+}
+
+function initVelocityCanvas() {
+    velocityCanvas = document.getElementById('velocity-graph');
+    if (!velocityCanvas) return;
+
+    velocityCtx = velocityCanvas.getContext('2d');
+
+    // Clear canvas
+    velocityCtx.fillStyle = '#0a0a0f';
+    velocityCtx.fillRect(0, 0, velocityCanvas.width, velocityCanvas.height);
+
+    // Draw initial grid
+    drawVelocityGraphGrid();
+}
+
+function drawVelocityGraphGrid() {
+    if (!velocityCtx) return;
+
+    const w = velocityCanvas.width;
+    const h = velocityCanvas.height;
+
+    // Clear
+    velocityCtx.fillStyle = '#0a0a0f';
+    velocityCtx.fillRect(0, 0, w, h);
+
+    // Draw grid lines
+    velocityCtx.strokeStyle = '#2a2a3a';
+    velocityCtx.lineWidth = 1;
+
+    // Horizontal center line (zero)
+    velocityCtx.beginPath();
+    velocityCtx.moveTo(0, h / 2);
+    velocityCtx.lineTo(w, h / 2);
+    velocityCtx.stroke();
+
+    // Grid lines
+    velocityCtx.strokeStyle = '#1a1a24';
+    for (let i = 1; i < 4; i++) {
+        const y = (h / 4) * i;
+        velocityCtx.beginPath();
+        velocityCtx.moveTo(0, y);
+        velocityCtx.lineTo(w, y);
+        velocityCtx.stroke();
+    }
+}
+
+function updateVelocityArrow(vx, vy) {
+    const svg = document.getElementById('velocity-arrow');
+    if (!svg) return;
+
+    // Normalize velocity (max ~30)
+    const maxVel = 30.0;
+    const normVx = Math.max(-1, Math.min(1, vx / maxVel));
+    const normVy = Math.max(-1, Math.min(1, vy / maxVel));
+    const magnitude = Math.sqrt(normVx * normVx + normVy * normVy);
+
+    if (magnitude < 0.05) {
+        // No significant velocity - show small circle
+        svg.innerHTML = `<circle cx="0" cy="0" r="8" fill="#555570" />`;
+        return;
+    }
+
+    // Scale for display (radius 80 max)
+    const scale = 70;
+    const tipX = normVx * scale;
+    const tipY = -normVy * scale; // Flip Y for SVG coordinates
+
+    // Arrow color based on dominant direction
+    let color;
+    if (Math.abs(normVx) > Math.abs(normVy)) {
+        color = normVx > 0 ? '#ef4444' : '#3b82f6'; // red for Vx+, blue for Vx-
+    } else {
+        color = normVy > 0 ? '#22c55e' : '#a855f7'; // green for Vy+, purple for Vy-
+    }
+
+    // Calculate arrow head
+    const headLen = 15;
+    const headAngle = Math.PI / 6;
+    const angle = Math.atan2(tipY, tipX);
+
+    const head1X = tipX - headLen * Math.cos(angle - headAngle);
+    const head1Y = tipY - headLen * Math.sin(angle - headAngle);
+    const head2X = tipX - headLen * Math.cos(angle + headAngle);
+    const head2Y = tipY - headLen * Math.sin(angle + headAngle);
+
+    // Draw arrow with glow
+    svg.innerHTML = `
+        <defs>
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+                <feMerge>
+                    <feMergeNode in="coloredBlur"/>
+                    <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+        </defs>
+        <line x1="0" y1="0" x2="${tipX}" y2="${tipY}"
+              stroke="${color}" stroke-width="4" stroke-linecap="round"
+              filter="url(#glow)" />
+        <polygon points="${tipX},${tipY} ${head1X},${head1Y} ${head2X},${head2Y}"
+                 fill="${color}" filter="url(#glow)" />
+        <circle cx="0" cy="0" r="6" fill="${color}" />
+    `;
+}
+
+function updateVelocityValues(vx, vy) {
+    const vxEl = document.getElementById('vx-value');
+    const vyEl = document.getElementById('vy-value');
+
+    if (vxEl) vxEl.textContent = (vx >= 0 ? '+' : '') + vx.toFixed(1);
+    if (vyEl) vyEl.textContent = (vy >= 0 ? '+' : '') + vy.toFixed(1);
+}
+
+function updateVelocityGraph(vx, vy) {
+    if (!velocityCtx) return;
+
+    // Add to history
+    vxHistory.push(vx);
+    vyHistory.push(vy);
+
+    // Trim history
+    if (vxHistory.length > velocityHistoryMax) {
+        vxHistory.shift();
+        vyHistory.shift();
+    }
+
+    const w = velocityCanvas.width;
+    const h = velocityCanvas.height;
+
+    // Redraw grid
+    drawVelocityGraphGrid();
+
+    // Find max for scaling
+    const allVals = [...vxHistory, ...vyHistory];
+    const maxVal = Math.max(30, Math.max(...allVals.map(Math.abs)));
+
+    // Draw Vx line (red)
+    if (vxHistory.length > 1) {
+        velocityCtx.beginPath();
+        velocityCtx.strokeStyle = '#ef4444';
+        velocityCtx.lineWidth = 2;
+
+        for (let i = 0; i < vxHistory.length; i++) {
+            const x = (i / velocityHistoryMax) * w;
+            const y = h / 2 - (vxHistory[i] / maxVal) * (h / 2 - 10);
+
+            if (i === 0) velocityCtx.moveTo(x, y);
+            else velocityCtx.lineTo(x, y);
+        }
+        velocityCtx.stroke();
+    }
+
+    // Draw Vy line (green)
+    if (vyHistory.length > 1) {
+        velocityCtx.beginPath();
+        velocityCtx.strokeStyle = '#22c55e';
+        velocityCtx.lineWidth = 2;
+
+        for (let i = 0; i < vyHistory.length; i++) {
+            const x = (i / velocityHistoryMax) * w;
+            const y = h / 2 - (vyHistory[i] / maxVal) * (h / 2 - 10);
+
+            if (i === 0) velocityCtx.moveTo(x, y);
+            else velocityCtx.lineTo(x, y);
+        }
+        velocityCtx.stroke();
+    }
+
+    // Draw legend
+    velocityCtx.font = '10px JetBrains Mono';
+    velocityCtx.fillStyle = '#ef4444';
+    velocityCtx.fillText('Vx', 5, 12);
+    velocityCtx.fillStyle = '#22c55e';
+    velocityCtx.fillText('Vy', 25, 12);
 }
 
 function renderGrid(beliefMap, badChannels) {
@@ -285,10 +467,11 @@ function renderGlobalMap(globalMapping) {
     const displaySize = evidence.length; // 48x48
     const cellDisplaySize = globalCanvasSize / displaySize;
 
+    // Flip both axes to match array view coordinate system
     for (let row = 0; row < displaySize; row++) {
         for (let col = 0; col < displaySize; col++) {
-            const x = col * cellDisplaySize;
-            const y = row * cellDisplaySize;
+            const x = (displaySize - 1 - col) * cellDisplaySize;
+            const y = (displaySize - 1 - row) * cellDisplaySize;
             const evidenceVal = evidence[row][col];
             const confidenceVal = confidence[row][col];
 
@@ -303,11 +486,11 @@ function renderGlobalMap(globalMapping) {
     if (globalMapping.hotspots) {
         for (const hotspot of globalMapping.hotspots) {
             const [gRow, gCol] = hotspot.global_position;
-            // Convert from 96x96 to 48x48 display coordinates
+            // Convert from 96x96 to 48x48 display coordinates, then flip
             const displayRow = gRow / 2;
             const displayCol = gCol / 2;
-            const x = displayCol * cellDisplaySize;
-            const y = displayRow * cellDisplaySize;
+            const x = (displaySize - 1 - displayCol) * cellDisplaySize;
+            const y = (displaySize - 1 - displayRow) * cellDisplaySize;
 
             // Draw hotspot circle
             globalCtx.beginPath();
@@ -339,10 +522,11 @@ function updateArrayPositionIndicator(globalMapping) {
 
     const [r1, c1, r2, c2] = globalMapping.array_bounds;
 
-    // Convert from 96x96 global coords to display coords
+    // Convert from 96x96 global coords to display coords, flipped to match array view
     const scale = globalCanvasSize / globalMapSize;
-    const x = c1 * scale + 16; // +16 for padding
-    const y = r1 * scale + 16;
+    // Flip: x = (globalMapSize - c2) * scale, y = (globalMapSize - r2) * scale
+    const x = (globalMapSize - c2) * scale + 16; // +16 for padding
+    const y = (globalMapSize - r2) * scale + 16;
     const width = (c2 - c1) * scale;
     const height = (r2 - r1) * scale;
 
@@ -425,8 +609,22 @@ function updateGuidance(guidance) {
         return;
     }
 
-    // Update direction text
-    directionText.textContent = guidance.direction;
+    // Update direction text - flip to match flipped display
+    let displayDirection = guidance.direction;
+    if (displayDirection && displayDirection.startsWith('MOVE ')) {
+        // Flip the direction text to match visual display
+        // Use symbols as placeholders to avoid replacement conflicts
+        displayDirection = displayDirection
+            .replace(/UP/g, '⬆')
+            .replace(/DOWN/g, '⬇')
+            .replace(/LEFT/g, '⬅')
+            .replace(/RIGHT/g, '➡')
+            .replace(/⬆/g, 'DOWN')
+            .replace(/⬇/g, 'UP')
+            .replace(/⬅/g, 'RIGHT')
+            .replace(/➡/g, 'LEFT');
+    }
+    directionText.textContent = displayDirection;
 
     if (guidance.is_centered) {
         directionText.className = 'direction-text centered';
@@ -440,8 +638,22 @@ function updateGuidance(guidance) {
         centerMarker.classList.remove('centered');
     }
 
-    // Update arrow
-    const arrowPath = ARROW_PATHS[guidance.arrow] || '';
+    // Update arrow - flip direction to match the flipped display
+    // Since renderGrid flips both X and Y axes, we need to flip the arrow direction
+    let arrowDir = guidance.arrow;
+    if (arrowDir && arrowDir !== 'center') {
+        // Build flipped direction by swapping up<->down and left<->right
+        const parts = arrowDir.split('-');
+        const flippedParts = parts.map(part => {
+            if (part === 'up') return 'down';
+            if (part === 'down') return 'up';
+            if (part === 'left') return 'right';
+            if (part === 'right') return 'left';
+            return part;
+        });
+        arrowDir = flippedParts.join('-');
+    }
+    const arrowPath = ARROW_PATHS[arrowDir] || '';
     if (arrowPath) {
         arrowSvg.innerHTML = `<path d="${arrowPath}" />`;
     } else {
@@ -572,6 +784,13 @@ function processMessage(data) {
         if (data.ground_truth) {
             renderGroundTruthOverlay(data.ground_truth);
             updatePhaseDisplay(data.ground_truth);
+
+            // Update velocity display
+            const vx = data.ground_truth.vx || 0;
+            const vy = data.ground_truth.vy || 0;
+            updateVelocityArrow(vx, vy);
+            updateVelocityValues(vx, vy);
+            updateVelocityGraph(vx, vy);
         }
 
         // Render global brain map
@@ -653,6 +872,15 @@ function reset() {
         globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
     }
 
+    // Clear velocity history and canvas
+    vxHistory = [];
+    vyHistory = [];
+    if (velocityCtx) {
+        drawVelocityGraphGrid();
+    }
+    updateVelocityArrow(0, 0);
+    updateVelocityValues(0, 0);
+
     // Reset UI elements
     updateGuidance(null);
     updateClusterCount(0);
@@ -675,6 +903,7 @@ function reset() {
 function init() {
     initCanvas();
     initGlobalCanvas();
+    initVelocityCanvas();
 
     // Connect button handler
     document.getElementById('connect-btn').addEventListener('click', connect);

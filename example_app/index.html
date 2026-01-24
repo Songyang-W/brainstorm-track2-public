@@ -117,6 +117,41 @@
                         <div class="centered-text">CENTERED</div>
                     </div>
                 </div>
+
+                <!-- Velocity Direction Panel -->
+                <div class="velocity-section">
+                    <div class="section-label">CURSOR VELOCITY</div>
+
+                    <div class="velocity-compass">
+                        <div class="compass-ring"></div>
+                        <div class="compass-crosshair-h"></div>
+                        <div class="compass-crosshair-v"></div>
+                        <div class="compass-labels">
+                            <span class="compass-label top" style="color: #22c55e;">Vy+</span>
+                            <span class="compass-label bottom" style="color: #a855f7;">Vy-</span>
+                            <span class="compass-label left" style="color: #3b82f6;">Vx-</span>
+                            <span class="compass-label right" style="color: #ef4444;">Vx+</span>
+                        </div>
+                        <svg id="velocity-arrow" viewBox="-50 -50 100 100" class="velocity-arrow-svg">
+                            <!-- Arrow will be drawn dynamically -->
+                        </svg>
+                    </div>
+
+                    <div class="velocity-values">
+                        <div class="velocity-row">
+                            <span class="velocity-label" style="color: #ef4444;">Vx:</span>
+                            <span class="velocity-value" id="vx-value">+0.0</span>
+                        </div>
+                        <div class="velocity-row">
+                            <span class="velocity-label" style="color: #22c55e;">Vy:</span>
+                            <span class="velocity-value" id="vy-value">+0.0</span>
+                        </div>
+                    </div>
+
+                    <div class="velocity-graph-container">
+                        <canvas id="velocity-graph" width="280" height="120"></canvas>
+                    </div>
+                </div>
             </div>
         </main>
 

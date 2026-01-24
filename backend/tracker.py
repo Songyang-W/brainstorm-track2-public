@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 from scipy.ndimage import center_of_mass, gaussian_filter, label
-from scipy.signal import correlate2d
 
 
 class EvidenceTracker:
@@ -90,6 +89,83 @@ class EvidenceTracker:
         self.current_activity = np.zeros((self.grid_size, self.grid_size))
 
 
+class BlendedEvidenceTracker:
+    """
+    Blend current belief_map with persistent_evidence for robust tracking.
+
+    Combines short-term responsiveness with historical stability to prevent
+    tracking loss during temporary signal dips.
+    """
+
+    def __init__(
+        self,
+        grid_size: int = 32,
+        current_weight: float = 0.6,
+        historical_weight: float = 0.4,
+        adaptive_threshold: float = 0.5,
+        adaptive_historical_weight: float = 0.7,
+    ):
+        """
+        Initialize blended evidence tracker.
+
+        Args:
+            grid_size: Size of electrode grid
+            current_weight: Weight for current belief_map (primary)
+            historical_weight: Weight for persistent_evidence
+            adaptive_threshold: When historical > this, increase its weight
+            adaptive_historical_weight: Historical weight when above threshold
+        """
+        self.grid_size = grid_size
+        self.current_weight = current_weight
+        self.historical_weight = historical_weight
+        self.adaptive_threshold = adaptive_threshold
+        self.adaptive_historical_weight = adaptive_historical_weight
+
+    def blend(
+        self,
+        belief_map: np.ndarray,
+        persistent_evidence: np.ndarray | None,
+    ) -> np.ndarray:
+        """
+        Blend current belief_map with persistent_evidence.
+
+        Args:
+            belief_map: Current short-term evidence (32x32)
+            persistent_evidence: Long-term historical evidence (32x32) or None
+
+        Returns:
+            Blended evidence map (32x32)
+        """
+        if persistent_evidence is None:
+            return belief_map.copy()
+
+        # Reshape if needed
+        belief = belief_map.reshape(self.grid_size, self.grid_size)
+        persistent = persistent_evidence.reshape(self.grid_size, self.grid_size)
+
+        # Check if historical evidence is strong (indicates confirmed region)
+        max_historical = np.max(persistent)
+
+        if max_historical > self.adaptive_threshold:
+            # Strong historical signal - increase historical weight for stability
+            curr_w = 1.0 - self.adaptive_historical_weight
+            hist_w = self.adaptive_historical_weight
+        else:
+            # Normal blending
+            curr_w = self.current_weight
+            hist_w = self.historical_weight
+
+        # Normalize weights
+        total = curr_w + hist_w
+        curr_w /= total
+        hist_w /= total
+
+        # Blend the maps
+        blended = curr_w * belief + hist_w * persistent
+
+        return blended
+
+
 class HotspotDetector:
     """Detect hotspot clusters and their centroids."""
 
@@ -99,6 +175,8 @@ class HotspotDetector:
         spatial_sigma: float = 1.5,
         cluster_threshold: float = 0.3,
         min_cluster_size: int = 4,
+        hysteresis_distance: float = 2.0,
+        smoothing_alpha: float = 0.3,
     ):
         """
         Initialize hotspot detector.
@@ -108,11 +186,18 @@ class HotspotDetector:
             spatial_sigma: Gaussian smoothing sigma
             cluster_threshold: Minimum value for hotspot detection
             min_cluster_size: Minimum pixels in a valid cluster
+            hysteresis_distance: Grid units before allowing immediate jump
+            smoothing_alpha: Smoothing factor for small movements
         """
         self.grid_size = grid_size
         self.spatial_sigma = spatial_sigma
         self.cluster_threshold = cluster_threshold
         self.min_cluster_size = min_cluster_size
+        self.hysteresis_distance = hysteresis_distance
+        self.smoothing_alpha = smoothing_alpha
+
+        # Track last centroid for hysteresis
+        self.last_centroid: tuple[float, float] | None = None
 
     def detect(
         self, belief_map: np.ndarray, bad_channels: np.ndarray | None = None
@@ -171,6 +256,7 @@ class HotspotDetector:
                 valid_clusters[cluster_mask] = len(cluster_info)
 
         # Compute overall weighted centroid
+        raw_centroid = None
         if np.sum(smoothed > self.cluster_threshold) > 0:
             # Weight by activity level
             weights = smoothed * (smoothed > self.cluster_threshold)
@@ -179,11 +265,10 @@ class HotspotDetector:
                 rows, cols = np.indices(smoothed.shape)
                 centroid_row = np.sum(rows * weights) / total_weight
                 centroid_col = np.sum(cols * weights) / total_weight
-                centroid = (float(centroid_row), float(centroid_col))
-            else:
-                centroid = None
-        else:
-            centroid = None
+                raw_centroid = (float(centroid_row), float(centroid_col))
+
+        # Apply centroid hysteresis
+        centroid = self._apply_centroid_hysteresis(raw_centroid)
 
         return {
             "smoothed": smoothed,
@@ -192,6 +277,53 @@ class HotspotDetector:
             "centroid": centroid,
             "cluster_info": cluster_info,
         }
+
+    def _apply_centroid_hysteresis(
+        self, new_centroid: tuple[float, float] | None
+    ) -> tuple[float, float] | None:
+        """
+        Apply hysteresis to prevent centroid jitter.
+
+        Large jumps (>hysteresis_distance) are allowed immediately.
+        Small movements are smoothed with exponential averaging.
+
+        Args:
+            new_centroid: Raw detected centroid or None
+
+        Returns:
+            Smoothed centroid with hysteresis applied
+        """
+        if new_centroid is None:
+            # No detection - keep last known position for a bit
+            # (don't immediately lose tracking)
+            return self.last_centroid
+
+        if self.last_centroid is None:
+            # First detection - use directly
+            self.last_centroid = new_centroid
+            return new_centroid
+
+        # Calculate distance from last centroid
+        dr = new_centroid[0] - self.last_centroid[0]
+        dc = new_centroid[1] - self.last_centroid[1]
+        distance = np.sqrt(dr * dr + dc * dc)
+
+        if distance > self.hysteresis_distance:
+            # Large jump - allow immediately (real movement)
+            self.last_centroid = new_centroid
+            return new_centroid
+        else:
+            # Small movement - smooth toward new position
+            smoothed_row = (
+                self.smoothing_alpha * new_centroid[0]
+                + (1 - self.smoothing_alpha) * self.last_centroid[0]
+            )
+            smoothed_col = (
+                self.smoothing_alpha * new_centroid[1]
+                + (1 - self.smoothing_alpha) * self.last_centroid[1]
+            )
+            self.last_centroid = (smoothed_row, smoothed_col)
+            return self.last_centroid
 
 
 class GuidanceGenerator:
@@ -325,6 +457,8 @@ class BCITracker:
         spatial_sigma: float = 1.5,
         cluster_threshold: float = 0.3,
         center_tolerance: float = 2.0,
+        blend_current_weight: float = 0.6,
+        blend_historical_weight: float = 0.4,
     ):
         """
         Initialize complete tracker.
@@ -337,6 +471,8 @@ class BCITracker:
             spatial_sigma: Spatial smoothing sigma
             cluster_threshold: Hotspot detection threshold
             center_tolerance: Distance for "centered" state
+            blend_current_weight: Weight for current belief_map in blending
+            blend_historical_weight: Weight for persistent_evidence in blending
         """
         self.grid_size = grid_size
 
@@ -345,6 +481,12 @@ class BCITracker:
             accumulation_alpha=accumulation_alpha,
             activity_threshold=activity_threshold,
             decay_rate=decay_rate,
+        )
+
+        self.blended_tracker = BlendedEvidenceTracker(
+            grid_size=grid_size,
+            current_weight=blend_current_weight,
+            historical_weight=blend_historical_weight,
         )
 
         self.hotspot_detector = HotspotDetector(
@@ -359,7 +501,10 @@ class BCITracker:
         )
 
     def update(
-        self, normalized_power: np.ndarray, bad_channels: np.ndarray
+        self,
+        normalized_power: np.ndarray,
+        bad_channels: np.ndarray,
+        persistent_evidence: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """
         Process new data and generate guidance.
@@ -367,15 +512,19 @@ class BCITracker:
         Args:
             normalized_power: Shape (n_channels,), values in [0, 1]
             bad_channels: Boolean mask of bad channels
+            persistent_evidence: Optional long-term evidence from GlobalMapper
 
         Returns:
             Complete tracking result with all data for rendering
         """
-        # Update belief map
+        # Update belief map (short-term evidence)
         belief_map = self.evidence_tracker.update(normalized_power, bad_channels)
 
-        # Detect hotspots
-        hotspot_result = self.hotspot_detector.detect(belief_map, bad_channels)
+        # Blend current belief_map with persistent_evidence for robust tracking
+        blended_map = self.blended_tracker.blend(belief_map, persistent_evidence)
+
+        # Detect hotspots using blended map for stable centroid tracking
+        hotspot_result = self.hotspot_detector.detect(blended_map, bad_channels)
 
         # Calculate confidence based on hotspot strength
         if (
@@ -394,6 +543,7 @@ class BCITracker:
 
         return {
             "belief_map": belief_map.tolist(),
+            "blended_map": blended_map.tolist(),
             "smoothed_map": hotspot_result["smoothed"].tolist(),
             "current_activity": self.evidence_tracker.current_activity.tolist(),
             "clusters": hotspot_result["clusters"].tolist(),
@@ -411,6 +561,7 @@ class BCITracker:
         self.evidence_tracker.reset()
         self.guidance_generator.smoothed_offset_row = 0.0
         self.guidance_generator.smoothed_offset_col = 0.0
+        self.hotspot_detector.last_centroid = None
 
 
 # ============================================================================
@@ -527,9 +678,7 @@ class HotspotTracker:
 
         return (0.0, 0.0)
 
-    def _find_hotspots(
-        self, smoothed: np.ndarray, bad_mask: np.ndarray
-    ) -> list[dict]:
+    def _find_hotspots(self, smoothed: np.ndarray, bad_mask: np.ndarray) -> list[dict]:
         """Find hotspot peaks in smoothed activity."""
         hotspots = []
 
@@ -560,11 +709,13 @@ class HotspotTracker:
             confidence = min(1.0, peak_val / 0.5)
 
             if confidence >= self.min_confidence:
-                hotspots.append({
-                    "position": (float(peak_idx[0]), float(peak_idx[1])),
-                    "confidence": confidence,
-                    "size": int(size),
-                })
+                hotspots.append(
+                    {
+                        "position": (float(peak_idx[0]), float(peak_idx[1])),
+                        "confidence": confidence,
+                        "size": int(size),
+                    }
+                )
 
         # Sort by confidence and return top N
         hotspots.sort(key=lambda x: x["confidence"], reverse=True)
@@ -665,7 +816,9 @@ class GlobalBrainMap:
         self.array_position[0] = np.clip(self.array_position[0], 0, max_pos)
         self.array_position[1] = np.clip(self.array_position[1], 0, max_pos)
 
-    def set_position_from_ground_truth(self, gt_center_row: float, gt_center_col: float):
+    def set_position_from_ground_truth(
+        self, gt_center_row: float, gt_center_col: float
+    ):
         """
         Set array position directly from ground truth (dev mode only).
 
@@ -1044,7 +1197,20 @@ class GlobalMapper:
             # Dev mode: use ground truth to set position (more accurate)
             center_row = (ground_truth["vy_pos"][0] + ground_truth["vy_neg"][0]) / 2 + 1
             center_col = (ground_truth["vx_pos"][1] + ground_truth["vx_neg"][1]) / 2 + 1
+            # DEBUG: print values once per second
+            if int(time_s) != int(time_s - 0.02) and int(time_s) % 5 == 0:
+                print(
+                    f"DEBUG GT: vy_pos={ground_truth['vy_pos']}, vy_neg={ground_truth['vy_neg']}"
+                )
+                print(
+                    f"DEBUG GT: vx_pos={ground_truth['vx_pos']}, vx_neg={ground_truth['vx_neg']}"
+                )
+                print(
+                    f"DEBUG: center=({center_row}, {center_col}), array_pos before={self.global_map.array_position}"
+                )
             self.global_map.set_position_from_ground_truth(center_row, center_col)
+            if int(time_s) != int(time_s - 0.02) and int(time_s) % 5 == 0:
+                print(f"DEBUG: array_pos after={self.global_map.array_position}")
         else:
             # Live mode: use hotspot-based motion tracking
             self.global_map.update_position(dx, dy)
@@ -1073,10 +1239,14 @@ class GlobalMapper:
 
         # Build result - ensure all numpy types are converted to Python types
         return {
-            "array_position": [float(self.global_map.array_position[0]),
-                               float(self.global_map.array_position[1])],
+            "array_position": [
+                float(self.global_map.array_position[0]),
+                float(self.global_map.array_position[1]),
+            ],
             "array_bounds": [int(x) for x in self.global_map.get_array_bounds()],
-            "cumulative_motion": [float(x) for x in self.hotspot_tracker.get_position_offset()],
+            "cumulative_motion": [
+                float(x) for x in self.hotspot_tracker.get_position_offset()
+            ],
             "global_evidence": downsampled["evidence"].tolist(),
             "global_confidence": downsampled["confidence"].tolist(),
             "global_peak_evidence": downsampled["peak_evidence"].tolist(),
