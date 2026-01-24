@@ -164,7 +164,11 @@ class FilterPipeline:
             fs=fs,
         )
 
-    def process(self, data: np.ndarray) -> np.ndarray:
+        # Noise metrics (EMA smoothed)
+        self.noise_ratio = 0.0  # How much 60Hz noise is present (0-1)
+        self.noise_ema_alpha = 0.05  # Slow smoothing for stability
+
+    def process(self, data: np.ndarray) -> tuple[np.ndarray, float]:
         """
         Apply full filter pipeline.
 
@@ -172,12 +176,36 @@ class FilterPipeline:
             data: Shape (n_samples, n_channels)
 
         Returns:
-            Filtered data
+            Tuple of (filtered_data, noise_ratio)
+            - filtered_data: Shape (n_samples, n_channels)
+            - noise_ratio: 0-1 indicating how much 60Hz noise was removed
         """
+        # Measure pre-notch variance for noise estimation
+        pre_notch_var = np.var(data, axis=0).mean()
+
         # Remove 60Hz line noise
         data = self.notch_60.process(data)
+
+        # Measure post-notch variance
+        post_notch_var = np.var(data, axis=0).mean()
+
+        # Calculate noise ratio (how much was removed by notch)
+        # High ratio = lots of 60Hz noise was present
+        if pre_notch_var > 1e-12:
+            instant_noise_ratio = 1.0 - (post_notch_var / pre_notch_var)
+            instant_noise_ratio = np.clip(instant_noise_ratio, 0.0, 1.0)
+        else:
+            instant_noise_ratio = 0.0
+
+        # EMA smooth the noise ratio for stability
+        self.noise_ratio = (
+            self.noise_ema_alpha * instant_noise_ratio
+            + (1 - self.noise_ema_alpha) * self.noise_ratio
+        )
+
         # Remove 120Hz harmonic (within our 70-150Hz band)
         data = self.notch_120.process(data)
         # Then extract high-gamma band
         data = self.bandpass.process(data)
-        return data
+
+        return data, float(self.noise_ratio)

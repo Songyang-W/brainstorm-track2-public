@@ -16,6 +16,9 @@ dependencies = [
     "huggingface-hub>=0.20.0",
     "pynput>=1.7.0",
     "playwright>=1.57.0",
+    "matplotlib>=3.10.8",
+    "torch>=2.0.0",
+    "opencv-python>=4.13.0.90",
 ]
 
 [project.scripts]

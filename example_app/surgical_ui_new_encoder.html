@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IonPath - BCI Placement</title>
+    <title>IonPath - BCI Placement [ENCODER]</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -63,6 +63,17 @@
             font-size: 24px;
             font-weight: 700;
             color: var(--text-primary);
+        }
+
+        .encoder-badge {
+            font-size: 10px;
+            font-weight: 700;
+            color: white;
+            background: #7c3aed;
+            padding: 3px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
         .recording-dot {
@@ -545,6 +556,7 @@
         <div class="top-bar">
             <div class="top-bar-left">
                 <span class="app-title">IonPath</span>
+                <span class="encoder-badge">Encoder</span>
                 <div class="connection-status">
                     <div class="connection-dot" id="connection-dot"></div>
                     <span id="connection-text">Disconnected</span>
@@ -669,17 +681,27 @@
         // ========================================
         // Configuration
         // ========================================
-        const BACKEND_URL = 'ws://localhost:8766';
+        const BACKEND_URL = 'ws://localhost:8767';
         const CONTROL_URL = 'ws://localhost:8765/control';
         const RECONNECT_DELAY = 2000;
 
         // ========================================
-        // Canvas Setup
+        // Canvas Setup (with smooth interpolation like OpenCV INTER_CUBIC)
         // ========================================
         const canvas = document.getElementById('heatmap-canvas');
         const ctx = canvas.getContext('2d');
         const gridSize = 32;
-        const cellSize = canvas.width / gridSize;
+        const displaySize = canvas.width;  // 520px
+
+        // Create offscreen 32x32 canvas for raw pixel data
+        const offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = gridSize;
+        offscreenCanvas.height = gridSize;
+        const offscreenCtx = offscreenCanvas.getContext('2d');
+
+        // Enable smooth scaling (like OpenCV INTER_CUBIC)
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
 
         // ========================================
         // State
@@ -966,44 +988,97 @@
         }
 
         // ========================================
-        // Rendering
+        // Rendering (match OpenCV pipeline: resize grayscale, THEN apply colormap)
         // ========================================
         function renderHeatmap() {
+            // Match OpenCV pipeline: grayscale first, resize, THEN apply colormap
+            // This produces sharp color transitions instead of blurry color blending
+
+            // Step 1: Draw GRAYSCALE to 32x32 offscreen canvas
+            const grayData = offscreenCtx.createImageData(gridSize, gridSize);
+
             for (let row = 0; row < gridSize; row++) {
                 for (let col = 0; col < gridSize; col++) {
-                    const x = col * cellSize;
-                    const y = row * cellSize;
                     // Flip both axes to match new_encoder.html orientation
                     const srcRow = gridSize - 1 - row;
                     const srcCol = gridSize - 1 - col;
                     const value = signalData[srcRow]?.[srcCol] ?? 0;
-
-                    // Check if this is a bad channel
                     const isBad = badChannels[srcRow]?.[srcCol] ?? false;
 
-                    if (isBad) {
-                        // Mark bad channels with dark gray
-                        ctx.fillStyle = '#444';
-                    } else {
-                        ctx.fillStyle = getHeatmapColor(value);
-                    }
-                    ctx.fillRect(x, y, cellSize - 0.5, cellSize - 0.5);
+                    // Convert to grayscale (0-253) - use 254 as bad channel marker
+                    const gray = isBad ? 254 : Math.round(Math.max(0, Math.min(1, value)) * 253);
+                    const idx = (row * gridSize + col) * 4;
+                    grayData.data[idx] = gray;
+                    grayData.data[idx + 1] = gray;
+                    grayData.data[idx + 2] = gray;
+                    grayData.data[idx + 3] = 255;
+                }
+            }
+            offscreenCtx.putImageData(grayData, 0, 0);
+
+            // Step 2: Scale up grayscale with smooth interpolation (like cv2.resize INTER_CUBIC)
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(offscreenCanvas, 0, 0, gridSize, gridSize, 0, 0, displaySize, displaySize);
+
+            // Step 3: Read back the scaled grayscale pixels
+            const scaledData = ctx.getImageData(0, 0, displaySize, displaySize);
+
+            // Step 4: Apply colormap to each pixel (like cv2.applyColorMap AFTER resize)
+            for (let i = 0; i < scaledData.data.length; i += 4) {
+                const gray = scaledData.data[i];  // R=G=B for grayscale
+
+                // Check if this is a bad channel marker (gray >= 254 means bad channel area)
+                if (gray >= 254) {
+                    // Bad channel - dark gray
+                    scaledData.data[i] = 68;
+                    scaledData.data[i + 1] = 68;
+                    scaledData.data[i + 2] = 68;
+                } else {
+                    // Convert grayscale back to 0-1 range and apply colormap
+                    const value = gray / 253;
+                    const rgb = getHeatmapColorRGB(value);
+                    scaledData.data[i] = rgb.r;
+                    scaledData.data[i + 1] = rgb.g;
+                    scaledData.data[i + 2] = rgb.b;
+                }
+                // Alpha stays 255
+            }
+
+            // Step 5: Put the colorized image back
+            ctx.putImageData(scaledData, 0, 0);
+        }
+
+        // Helper function returning RGB object (for ImageData)
+        function getHeatmapColorRGB(value) {
+            const colors = [
+                { pos: 0, r: 129, g: 212, b: 250 },    // Light blue
+                { pos: 0.3, r: 179, g: 229, b: 252 },  // Lighter blue
+                { pos: 0.5, r: 255, g: 204, b: 128 },  // Light orange
+                { pos: 0.7, r: 249, g: 168, b: 37 },   // Orange
+                { pos: 0.85, r: 230, g: 81, b: 0 },    // Deep orange
+                { pos: 1, r: 198, g: 40, b: 40 }       // Deep red
+            ];
+
+            let lower = colors[0];
+            let upper = colors[colors.length - 1];
+
+            for (let i = 0; i < colors.length - 1; i++) {
+                if (value >= colors[i].pos && value <= colors[i + 1].pos) {
+                    lower = colors[i];
+                    upper = colors[i + 1];
+                    break;
                 }
             }
 
-            // Subtle grid lines
-            ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
-            ctx.lineWidth = 0.5;
-            for (let i = 0; i <= gridSize; i++) {
-                ctx.beginPath();
-                ctx.moveTo(i * cellSize, 0);
-                ctx.lineTo(i * cellSize, canvas.height);
-                ctx.stroke();
-                ctx.beginPath();
-                ctx.moveTo(0, i * cellSize);
-                ctx.lineTo(canvas.width, i * cellSize);
-                ctx.stroke();
-            }
+            const range = upper.pos - lower.pos;
+            const t = range === 0 ? 0 : (value - lower.pos) / range;
+
+            return {
+                r: Math.round(lower.r + (upper.r - lower.r) * t),
+                g: Math.round(lower.g + (upper.g - lower.g) * t),
+                b: Math.round(lower.b + (upper.b - lower.b) * t)
+            };
         }
 
         // Convert backend arrow direction to angle (flipped 180° to match new_encoder.html)
@@ -1120,16 +1195,16 @@
                     dirValue.textContent = '● Centered';
                     dirValue.classList.add('centered');
                 } else {
-                    // Map direction text with arrows
+                    // Map direction text with arrows (flipped to match new_encoder.html)
                     const directionMap = {
-                        'MOVE UP': '↑ Up',
-                        'MOVE DOWN': '↓ Down',
-                        'MOVE LEFT': '← Left',
-                        'MOVE RIGHT': '→ Right',
-                        'MOVE UP-LEFT': '↖ Up-Left',
-                        'MOVE UP-RIGHT': '↗ Up-Right',
-                        'MOVE DOWN-LEFT': '↙ Down-Left',
-                        'MOVE DOWN-RIGHT': '↘ Down-Right',
+                        'MOVE UP': '↓ Down',
+                        'MOVE DOWN': '↑ Up',
+                        'MOVE LEFT': '→ Right',
+                        'MOVE RIGHT': '← Left',
+                        'MOVE UP-LEFT': '↘ Down-Right',
+                        'MOVE UP-RIGHT': '↙ Down-Left',
+                        'MOVE DOWN-LEFT': '↗ Up-Right',
+                        'MOVE DOWN-RIGHT': '↖ Up-Left',
                         'CENTERED': '● Centered'
                     };
                     dirValue.textContent = directionMap[currentGuidance.direction] || currentGuidance.direction;

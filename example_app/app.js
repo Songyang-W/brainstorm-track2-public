@@ -22,6 +22,10 @@ const canvasSize = 576; // 32 * 18
 const cellSize = canvasSize / 32;
 const padding = 16;
 
+// Offscreen canvas for smooth rendering (like OpenCV INTER_CUBIC)
+let offscreenCanvas = null;
+let offscreenCtx = null;
+
 // Global Map Canvas (REMOVED)
 // let globalCanvas = null;
 // let globalCtx = null;
@@ -88,6 +92,20 @@ function activityToColor(value) {
     return `rgb(${r}, ${g}, ${b})`;
 }
 
+// Returns RGB array for ImageData (used in smooth rendering)
+function activityToColorRGB(value) {
+    const v = Math.max(0, Math.min(1, value));
+
+    for (let i = 0; i < ACTIVITY_STOPS.length - 1; i++) {
+        if (v <= ACTIVITY_STOPS[i + 1]) {
+            const t = (v - ACTIVITY_STOPS[i]) / (ACTIVITY_STOPS[i + 1] - ACTIVITY_STOPS[i]);
+            return lerpColor(ACTIVITY_COLORS[i], ACTIVITY_COLORS[i + 1], t);
+        }
+    }
+
+    return ACTIVITY_COLORS[ACTIVITY_COLORS.length - 1];
+}
+
 // Arrow SVG paths for different directions
 const ARROW_PATHS = {
     'up': 'M50,20 L75,50 L60,50 L60,80 L40,80 L40,50 L25,50 Z',
@@ -108,6 +126,16 @@ function initCanvas() {
     // Set canvas size
     canvas.width = canvasSize;
     canvas.height = canvasSize;
+
+    // Create offscreen canvas for smooth rendering (32x32 pixels)
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = gridSize;
+    offscreenCanvas.height = gridSize;
+    offscreenCtx = offscreenCanvas.getContext('2d');
+
+    // Enable smooth scaling (like OpenCV INTER_CUBIC)
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     // Clear canvas
     ctx.fillStyle = '#0a0a0f';
@@ -294,49 +322,64 @@ function updateVelocityGraph(vx, vy) {
 function renderGrid(beliefMap, badChannels) {
     if (!beliefMap) return;
 
-    // Clear canvas
-    ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(0, 0, canvasSize, canvasSize);
+    // Match OpenCV pipeline: grayscale first, resize, THEN apply colormap
+    // This produces sharp color transitions instead of blurry color blending
 
-    // Draw each cell
+    // Step 1: Draw GRAYSCALE to 32x32 offscreen canvas
+    const grayData = offscreenCtx.createImageData(gridSize, gridSize);
+
     // Flip both axes to match ground truth coordinate system
     for (let row = 0; row < gridSize; row++) {
         for (let col = 0; col < gridSize; col++) {
-            const x = (gridSize - 1 - col) * cellSize;
-            const y = (gridSize - 1 - row) * cellSize;
-            const value = beliefMap[row][col];
-            const isBad = badChannels && badChannels[row][col];
+            // Flipped coordinates for reading
+            const srcRow = gridSize - 1 - row;
+            const srcCol = gridSize - 1 - col;
+            const value = beliefMap[srcRow]?.[srcCol] ?? 0;
+            const isBad = badChannels && badChannels[srcRow]?.[srcCol];
 
-            // Cell size with small gap
-            const size = cellSize - 1;
-
-            if (isBad) {
-                // Bad channel - gray
-                ctx.fillStyle = '#374151';
-            } else {
-                // Color by activity
-                ctx.fillStyle = activityToColor(value);
-
-                // Add glow effect for high activity
-                if (value > 0.5) {
-                    const glowIntensity = (value - 0.5) * 2;
-                    ctx.shadowColor = `rgba(250, 204, 21, ${glowIntensity * 0.5})`;
-                    ctx.shadowBlur = 8 * glowIntensity;
-                } else {
-                    ctx.shadowBlur = 0;
-                }
-            }
-
-            // Draw rounded rectangle
-            const radius = 3;
-            ctx.beginPath();
-            ctx.roundRect(x + 0.5, y + 0.5, size, size, radius);
-            ctx.fill();
-
-            // Reset shadow
-            ctx.shadowBlur = 0;
+            // Convert to grayscale (0-255) - store value, mark bad channels specially
+            // Use value 254 for bad channels (we'll detect this later)
+            const gray = isBad ? 254 : Math.round(Math.max(0, Math.min(1, value)) * 253);
+            const idx = (row * gridSize + col) * 4;
+            grayData.data[idx] = gray;
+            grayData.data[idx + 1] = gray;
+            grayData.data[idx + 2] = gray;
+            grayData.data[idx + 3] = 255;
         }
     }
+    offscreenCtx.putImageData(grayData, 0, 0);
+
+    // Step 2: Scale up grayscale with smooth interpolation (like cv2.resize INTER_CUBIC)
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(offscreenCanvas, 0, 0, gridSize, gridSize, 0, 0, canvasSize, canvasSize);
+
+    // Step 3: Read back the scaled grayscale pixels
+    const scaledData = ctx.getImageData(0, 0, canvasSize, canvasSize);
+
+    // Step 4: Apply colormap to each pixel (like cv2.applyColorMap AFTER resize)
+    for (let i = 0; i < scaledData.data.length; i += 4) {
+        const gray = scaledData.data[i];  // R=G=B for grayscale
+
+        // Check if this is a bad channel marker (gray >= 254 means bad channel area)
+        if (gray >= 254) {
+            // Bad channel - gray (#374151)
+            scaledData.data[i] = 55;
+            scaledData.data[i + 1] = 65;
+            scaledData.data[i + 2] = 81;
+        } else {
+            // Convert grayscale back to 0-1 range and apply colormap
+            const value = gray / 253;
+            const [r, g, b] = activityToColorRGB(value);
+            scaledData.data[i] = r;
+            scaledData.data[i + 1] = g;
+            scaledData.data[i + 2] = b;
+        }
+        // Alpha stays 255
+    }
+
+    // Step 5: Put the colorized image back
+    ctx.putImageData(scaledData, 0, 0);
 }
 
 function renderGroundTruthOverlay(groundTruth) {

@@ -189,9 +189,7 @@ class ControlClient:
                     if self.websocket:
                         # Wait for messages (with timeout to allow checking running state)
                         try:
-                            message = await asyncio.wait_for(
-                                self.websocket.recv(), timeout=0.1
-                            )
+                            await asyncio.wait_for(self.websocket.recv(), timeout=0.1)
                             # Silently handle any messages from server
                         except asyncio.TimeoutError:
                             # Timeout is fine, just check if we should continue

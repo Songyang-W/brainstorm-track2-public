@@ -21,6 +21,14 @@ from tracker import BCITracker, GlobalMapper
 from websockets.client import connect
 from websockets.server import serve
 
+# Optional encoder pipeline (requires PyTorch)
+try:
+    from encoder_pipeline import EncoderPipeline
+
+    ENCODER_AVAILABLE = True
+except ImportError:
+    ENCODER_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +47,8 @@ class BCIServer:
         fs: float = 500.0,
         grid_size: int = 32,
         data_dir: Path | None = None,
+        use_encoder: bool = False,
+        model_path: Path | str = "scripts/compass_model.pth",
     ):
         """
         Initialize server.
@@ -49,6 +59,8 @@ class BCIServer:
             fs: Sampling frequency
             grid_size: Size of electrode grid
             data_dir: Optional path to data directory for ground truth overlay
+            use_encoder: Use U-Net encoder pipeline instead of traditional DSP
+            model_path: Path to U-Net model weights (only used if use_encoder=True)
         """
         self.source_url = source_url
         self.serve_port = serve_port
@@ -56,6 +68,7 @@ class BCIServer:
         self.grid_size = grid_size
         self.n_channels = grid_size * grid_size
         self.batch_size = 10  # Samples per batch
+        self.use_encoder = use_encoder
 
         # Load ground truth if data_dir provided (dev mode)
         self.ground_truth: pd.DataFrame | None = None
@@ -69,22 +82,39 @@ class BCIServer:
             else:
                 logger.warning(f"Ground truth not found at {gt_path}")
 
-        # Initialize processing components
-        self.filter_pipeline = FilterPipeline(
-            fs=fs,
-            notch_freq=60.0,
-            notch_q=30.0,
-            bandpass_low=70.0,
-            bandpass_high=150.0,
-            bandpass_order=4,
-        )
+        # Initialize processing components based on mode
+        if use_encoder:
+            if not ENCODER_AVAILABLE:
+                raise ImportError(
+                    "Encoder mode requires PyTorch. Install with: pip install torch"
+                )
+            logger.info("Using U-Net encoder pipeline")
+            self.encoder_pipeline = EncoderPipeline(
+                model_path=model_path,
+                fs=fs,
+                n_channels=self.n_channels,
+            )
+            # Set to None to indicate encoder mode
+            self.filter_pipeline = None
+            self.signal_pipeline = None
+        else:
+            logger.info("Using traditional DSP pipeline")
+            self.encoder_pipeline = None
+            self.filter_pipeline = FilterPipeline(
+                fs=fs,
+                notch_freq=60.0,
+                notch_q=30.0,
+                bandpass_low=70.0,
+                bandpass_high=150.0,
+                bandpass_order=4,
+            )
 
-        self.signal_pipeline = SignalPipeline(
-            n_channels=self.n_channels,
-            ema_alpha=0.1,
-            dead_threshold=0,  # Disabled bad channel detection
-            artifact_std_multiplier=100.0,  # Effectively disabled
-        )
+            self.signal_pipeline = SignalPipeline(
+                n_channels=self.n_channels,
+                ema_alpha=0.1,
+                dead_threshold=0,  # Disabled bad channel detection
+                artifact_std_multiplier=100.0,  # Effectively disabled
+            )
 
         self.tracker = BCITracker(
             grid_size=grid_size,
@@ -190,11 +220,38 @@ class BCIServer:
                 self.samples_processed += neural_data.shape[0]
                 self.last_time_s = start_time_s
 
-                # Apply filters
-                filtered = self.filter_pipeline.process(neural_data)
+                # Process based on mode (encoder vs traditional DSP)
+                velocity_data = None
+                if self.use_encoder:
+                    # Encoder pipeline: bandpass + power + EMA + U-Net + velocity
+                    normalized, bad_channels = self.encoder_pipeline.process(
+                        neural_data
+                    )
+                    noise_ratio = self.encoder_pipeline.get_noise_ratio()
 
-                # Process through signal pipeline
-                normalized, bad_channels = self.signal_pipeline.process(filtered)
+                    # Get velocity from encoder pipeline
+                    velocity_result = self.encoder_pipeline.get_velocity()
+                    if velocity_result is not None:
+                        velocity_data = {
+                            "vx": velocity_result.vx,
+                            "vy": velocity_result.vy,
+                            "com_row": velocity_result.com_row,
+                            "com_col": velocity_result.com_col,
+                            "num_targets": velocity_result.num_targets,
+                            "cursor_x": velocity_result.cursor_x,
+                            "cursor_y": velocity_result.cursor_y,
+                        }
+                else:
+                    # Traditional pipeline: notch + bandpass + EMA
+                    filtered, noise_ratio = self.filter_pipeline.process(neural_data)
+                    normalized, bad_channels = self.signal_pipeline.process(filtered)
+
+                # Compute signal strength (mean of normalized power, excluding bad channels)
+                good_channels = ~bad_channels
+                if np.any(good_channels):
+                    signal_strength = float(np.mean(normalized[good_channels]))
+                else:
+                    signal_strength = 0.0
 
                 # Update global mapper FIRST to get persistent_evidence
                 # Note: Global mapper now uses only observation-based tracking (no GT)
@@ -210,6 +267,34 @@ class BCIServer:
                     normalized, bad_channels, persistent_evidence
                 )
 
+                # Get stability score from hotspot tracker
+                stability_score = (
+                    self.global_mapper.hotspot_tracker.get_stability_score()
+                )
+
+                # Calculate placement score: high only when stable AND centered
+                # This is the key metric for confirming good placement
+                guidance = tracking_result.get("guidance", {})
+                distance = guidance.get("distance", 16.0)
+                hotspot_confidence = guidance.get("confidence", 0.0)
+                max_distance = self.grid_size / 2  # 16 for 32x32 grid
+
+                # Proximity score: 1.0 at center, 0.0 at edge
+                proximity = max(0.0, 1.0 - distance / max_distance)
+
+                # Placement score: stable + centered + strong hotspot
+                # All three must be high for good placement
+                placement_score = stability_score * proximity * hotspot_confidence
+
+                # Build signal quality metrics for frontend
+                signal_quality = {
+                    "signal_strength": signal_strength,  # 0-1, mean normalized power
+                    "noise_ratio": noise_ratio,  # 0-1, how much 60Hz noise (lower = better)
+                    "stability": stability_score,  # 0-1, how stable the centroid is
+                    "proximity": proximity,  # 0-1, how close to center (1 = centered)
+                    "placement_score": placement_score,  # 0-1, overall placement quality
+                }
+
                 # Build output message
                 output = {
                     "type": "processed",
@@ -217,7 +302,12 @@ class BCIServer:
                     "samples_processed": self.samples_processed,
                     **tracking_result,
                     "global_mapping": global_mapping,
+                    "signal_quality": signal_quality,
                 }
+
+                # Add velocity data if available (encoder mode)
+                if velocity_data is not None:
+                    output["velocity"] = velocity_data
 
                 # Add ground truth overlay if available (dev mode)
                 if self.ground_truth is not None:
@@ -317,12 +407,30 @@ async def main():
         default=None,
         help="Data directory for ground truth overlay (dev mode)",
     )
+    parser.add_argument(
+        "--encoder",
+        action="store_true",
+        help="Use U-Net encoder pipeline instead of traditional DSP",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=Path("scripts/compass_model.pth"),
+        help="Path to U-Net model weights (only used with --encoder)",
+    )
     args = parser.parse_args()
+
+    # Default to port 8767 when using encoder mode (unless explicitly specified)
+    port = args.port
+    if args.encoder and args.port == 8766:
+        port = 8767
 
     server = BCIServer(
         source_url=args.source,
-        serve_port=args.port,
+        serve_port=port,
         data_dir=args.data_dir,
+        use_encoder=args.encoder,
+        model_path=args.model_path,
     )
     await server.run()
 
