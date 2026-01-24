@@ -106,10 +106,15 @@ class CompassProcessor:
         self.bad_z_lo = -3.0
         self.bad_thresh = 0.6
         self.z_cap = 8.0
-        self.active_threshold = 0.6
-        self.noise_active_thresh = 0.42
-        self.dog_sigma = 3.0
-        self.dog_scale = 0.6
+        self.supp_peak_n = 6
+        self.supp_smooth_sigma = 1.0
+        self.supp_suppress_radius = 6
+        self.supp_com_radius = 2
+        self.supp_min_abs = 0.2
+        self.supp_bg_sigma = 2.5
+        self.supp_bg_scale = 0.7
+        self.supp_blob_sigma = 1.2
+        self.supp_floor = 0.15
 
         # Interpretable peak+memory tracker (no fixed 4-region assumption).
         self.tracker = InterpretableClusterTracker(grid_size=self.grid_size)
@@ -209,12 +214,9 @@ class CompassProcessor:
 
         grid = self._to_grid(z)
         grid = gaussian_filter(grid, sigma=self.spatial_sigma)
-        active_frac = float(np.mean(z > self.active_threshold))
-        if active_frac > self.noise_active_thresh:
-            low = gaussian_filter(grid, sigma=self.dog_sigma)
-            grid_supp = np.maximum(0.0, grid - self.dog_scale * low)
-        else:
-            grid_supp = grid.copy()
+        grid_supp = self._suppressed_display(grid)
+        if grid_supp is None:
+            grid_supp = np.zeros_like(grid)
         track_grid = grid
         cr, cc, conf, memory, spots, track_states = self.tracker.update(track_grid, dt_s=dt)
         if cr is None or cc is None:
@@ -340,6 +342,39 @@ class CompassProcessor:
             disp = disp / mx
             if self.mem_display_floor > 0:
                 disp[disp < self.mem_display_floor] = 0.0
+                if float(disp.max()) <= 0:
+                    return None
+        return disp
+
+    def _suppressed_display(self, grid: np.ndarray) -> np.ndarray | None:
+        g = np.maximum(grid.astype(float), 0.0)
+        scale = float(np.percentile(g, 99.0)) + 1e-6
+        g_norm = np.clip(g / scale, 0.0, 1.0)
+        bg = gaussian_filter(g_norm, sigma=self.supp_bg_sigma)
+        hi = np.maximum(0.0, g_norm - self.supp_bg_scale * bg)
+        peaks = extract_peak_observations(
+            hi,
+            n_peaks=self.supp_peak_n,
+            smooth_sigma=self.supp_smooth_sigma,
+            suppress_radius=self.supp_suppress_radius,
+            com_radius=self.supp_com_radius,
+            min_abs=self.supp_min_abs,
+        )
+        if not peaks:
+            return None
+        disp = np.zeros_like(g_norm)
+        for r, c, v in peaks:
+            rr = int(round(float(r)))
+            cc = int(round(float(c)))
+            if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
+                disp[rr, cc] = max(disp[rr, cc], float(v))
+        if self.supp_blob_sigma > 0:
+            disp = gaussian_filter(disp, sigma=self.supp_blob_sigma)
+        mx = float(disp.max())
+        if mx > 0:
+            disp = disp / mx
+            if self.supp_floor > 0:
+                disp[disp < self.supp_floor] = 0.0
                 if float(disp.max()) <= 0:
                     return None
         return disp
