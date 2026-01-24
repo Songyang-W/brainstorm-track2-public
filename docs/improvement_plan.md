@@ -40,6 +40,7 @@ does not assume fixed Vx/Vy regions. It:
 - outputs a confidence based on track strength + count
 - maintains a long-memory map for debug UI
 - uses memory as a fallback anchor when confidence is low
+  - memory is center-aligned so it represents stable anchors, not drift trails
 
 ### 4. Signal Conditioning for Hard Mode
 

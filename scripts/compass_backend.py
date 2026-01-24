@@ -30,7 +30,11 @@ from rich.panel import Panel
 from scipy.ndimage import gaussian_filter
 from scipy.signal import butter, iirnotch, sosfilt, tf2sos
 
-from scripts.hotspot_tracker import InterpretableClusterTracker, SimpleKalmanFilter2D
+from scripts.hotspot_tracker import (
+    InterpretableClusterTracker,
+    SimpleKalmanFilter2D,
+    extract_peak_observations,
+)
 
 app = typer.Typer(help="Realtime processing backend for the OR 'Compass' UI")
 console = Console()
@@ -115,6 +119,10 @@ class CompassProcessor:
         self.conf_alpha = 0.3
         self.conf_ema: float | None = None
         self.mem_fallback_conf = 0.35
+        self.anchor_age_tau = self.tracker.age_tau_updates
+        self.mem_display_peaks = 4
+        self.mem_display_sigma = 1.0
+        self.mem_display_min = 0.25
 
     def _build_channel_map(self, channels_coords: list[list[int]] | None) -> np.ndarray | None:
         if not channels_coords:
@@ -201,11 +209,11 @@ class CompassProcessor:
         if cr is None or cc is None:
             return None
 
-        mem_r, mem_c = self.tracker.memory_center()
-        if mem_r is not None and mem_c is not None and conf < self.mem_fallback_conf:
+        anchor_r, anchor_c = self._anchor_center(track_states)
+        if anchor_r is not None and anchor_c is not None and conf < self.mem_fallback_conf:
             w = float(np.clip(conf / max(1e-3, self.mem_fallback_conf), 0.0, 1.0))
-            meas_r = w * float(cr) + (1.0 - w) * float(mem_r)
-            meas_c = w * float(cc) + (1.0 - w) * float(mem_c)
+            meas_r = w * float(cr) + (1.0 - w) * float(anchor_r)
+            meas_c = w * float(cc) + (1.0 - w) * float(anchor_c)
         else:
             meas_r, meas_c = float(cr), float(cc)
 
@@ -249,7 +257,7 @@ class CompassProcessor:
             "regions": {k: [float(v[0]), float(v[1]), float(v[2])] for (k, v) in regions.items()},
             # JSON-friendly payload (32x32 is small enough for local UI at ~15 Hz).
             "heatmap": grid.astype(np.float32).tolist(),
-            "memory": None if memory is None else memory.astype(np.float32).tolist(),
+            "memory": None,
         }
         if cursor_data:
             vx = [float(c.get("vx", 0.0)) for c in cursor_data if isinstance(c, dict)]
@@ -257,6 +265,8 @@ class CompassProcessor:
             if vx and vy:
                 frame["cursor_vx"] = float(np.mean(vx))
                 frame["cursor_vy"] = float(np.mean(vy))
+        mem_display = self._memory_display(memory)
+        frame["memory"] = None if mem_display is None else mem_display.astype(np.float32).tolist()
         return frame
 
     def reset(self) -> None:
@@ -269,6 +279,54 @@ class CompassProcessor:
         self.conf_ema = None
         self.badness[:] = 0.0
         self.bad_mask[:] = False
+
+    def _anchor_center(
+        self, track_states: list[tuple[float, float, float, int]]
+    ) -> tuple[float | None, float | None]:
+        if not track_states:
+            return None, None
+        weights = []
+        pts = []
+        for r, c, s, age in track_states:
+            w = float(s) * float(np.exp(-float(age) / max(1.0, self.anchor_age_tau)))
+            if w <= 0:
+                continue
+            weights.append(w)
+            pts.append((float(r), float(c)))
+        if not weights:
+            return None, None
+        wsum = float(np.sum(weights))
+        if wsum <= 0:
+            return None, None
+        r = float(np.sum([p[0] * w for p, w in zip(pts, weights)]) / wsum)
+        c = float(np.sum([p[1] * w for p, w in zip(pts, weights)]) / wsum)
+        return r, c
+
+    def _memory_display(self, memory: np.ndarray | None) -> np.ndarray | None:
+        if memory is None:
+            return None
+        peaks = extract_peak_observations(
+            memory,
+            n_peaks=self.mem_display_peaks,
+            smooth_sigma=0.6,
+            suppress_radius=4,
+            com_radius=1,
+            min_abs=self.mem_display_min,
+        )
+        if not peaks:
+            return None
+        disp = np.zeros_like(memory, dtype=float)
+        for r, c, v in peaks:
+            rr = int(round(float(r)))
+            cc = int(round(float(c)))
+            if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
+                disp[rr, cc] = max(disp[rr, cc], float(v))
+        if self.mem_display_sigma > 0:
+            disp = gaussian_filter(disp, sigma=self.mem_display_sigma)
+        mx = float(disp.max())
+        if mx > 0:
+            disp = disp / mx
+        return disp
 
 
 class CompassServer:

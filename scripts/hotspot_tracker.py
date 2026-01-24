@@ -209,11 +209,14 @@ class InterpretableClusterTracker:
         memory_sigma: float = 1.0,
         memory_update_conf: float = 0.25,
         memory_center_percentile: float = 85.0,
+        memory_top_k: int = 4,
+        memory_gain: float = 0.25,
         age_tau_updates: float = 120.0,
         conf_strength_weight: float = 0.7,
         conf_count_weight: float = 0.3,
     ):
         self.grid_size = int(grid_size)
+        self.mid = (self.grid_size - 1) / 2.0
         self.peak_n = int(peak_n)
         self.peak_smooth_sigma = float(peak_smooth_sigma)
         self.peak_suppress_radius = int(peak_suppress_radius)
@@ -231,6 +234,8 @@ class InterpretableClusterTracker:
         self.memory_sigma = float(memory_sigma)
         self.memory_update_conf = float(memory_update_conf)
         self.memory_center_percentile = float(memory_center_percentile)
+        self.memory_top_k = int(memory_top_k)
+        self.memory_gain = float(memory_gain)
         self.age_tau_updates = float(age_tau_updates)
         self.conf_strength_weight = float(conf_strength_weight)
         self.conf_count_weight = float(conf_count_weight)
@@ -261,6 +266,7 @@ class InterpretableClusterTracker:
     def _update_memory(
         self,
         track_states: list[tuple[float, float, float, int]],
+        center_rc: tuple[float, float] | None,
         dt_s: float,
         conf: float,
     ) -> np.ndarray:
@@ -269,13 +275,15 @@ class InterpretableClusterTracker:
         decay = 0.5 ** (dt_s / max(1e-3, self.memory_half_life_s))
         self.memory_map *= decay
 
-        if not track_states or conf < self.memory_update_conf:
+        if not track_states or conf < self.memory_update_conf or center_rc is None:
             return self.memory_map
 
         upd = np.zeros_like(self.memory_map)
-        for r, c, s, age in track_states:
-            rr = int(round(float(r)))
-            cc = int(round(float(c)))
+        center_r, center_c = center_rc
+        track_states = sorted(track_states, key=lambda x: float(x[2]), reverse=True)
+        for r, c, s, age in track_states[: self.memory_top_k]:
+            rr = int(round(float(r) - float(center_r) + self.mid))
+            cc = int(round(float(c) - float(center_c) + self.mid))
             if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
                 val = float(s) * self._age_weight(int(age))
                 if val > upd[rr, cc]:
@@ -284,10 +292,7 @@ class InterpretableClusterTracker:
         if float(upd.max()) > 0:
             if self.memory_sigma > 0:
                 upd = ndimage.gaussian_filter(upd, sigma=self.memory_sigma)
-            mx = float(upd.max())
-            if mx > 0:
-                upd = upd / mx
-            self.memory_map = np.maximum(self.memory_map, upd)
+            self.memory_map = np.clip(self.memory_map + self.memory_gain * upd, 0.0, 1.0)
         return self.memory_map
 
     def memory_center(self) -> tuple[float | None, float | None]:
@@ -331,7 +336,8 @@ class InterpretableClusterTracker:
         cr, cc, _tracks = self.tracker.update(observations)
         track_states = self.tracker.track_states()
         conf = self._confidence(track_states)
-        memory = self._update_memory(track_states, dt_s, conf)
+        center_rc = (float(cr), float(cc)) if cr is not None and cc is not None else None
+        memory = self._update_memory(track_states, center_rc, dt_s, conf)
         return cr, cc, conf, memory, observations, track_states
 
 
