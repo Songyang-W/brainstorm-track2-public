@@ -106,6 +106,10 @@ class CompassProcessor:
         self.bad_z_lo = -3.0
         self.bad_thresh = 0.6
         self.z_cap = 8.0
+        self.active_threshold = 0.6
+        self.noise_active_thresh = 0.42
+        self.dog_sigma = 3.0
+        self.dog_scale = 0.6
 
         # Interpretable peak+memory tracker (no fixed 4-region assumption).
         self.tracker = InterpretableClusterTracker(grid_size=self.grid_size)
@@ -123,6 +127,7 @@ class CompassProcessor:
         self.mem_display_peaks = 4
         self.mem_display_sigma = 1.0
         self.mem_display_min = 0.25
+        self.mem_display_floor = 0.35
 
     def _build_channel_map(self, channels_coords: list[list[int]] | None) -> np.ndarray | None:
         if not channels_coords:
@@ -204,8 +209,14 @@ class CompassProcessor:
 
         grid = self._to_grid(z)
         grid = gaussian_filter(grid, sigma=self.spatial_sigma)
-
-        cr, cc, conf, memory, spots, track_states = self.tracker.update(grid, dt_s=dt)
+        active_frac = float(np.mean(z > self.active_threshold))
+        if active_frac > self.noise_active_thresh:
+            low = gaussian_filter(grid, sigma=self.dog_sigma)
+            grid_supp = np.maximum(0.0, grid - self.dog_scale * low)
+        else:
+            grid_supp = grid.copy()
+        track_grid = grid
+        cr, cc, conf, memory, spots, track_states = self.tracker.update(track_grid, dt_s=dt)
         if cr is None or cc is None:
             return None
 
@@ -257,6 +268,7 @@ class CompassProcessor:
             "regions": {k: [float(v[0]), float(v[1]), float(v[2])] for (k, v) in regions.items()},
             # JSON-friendly payload (32x32 is small enough for local UI at ~15 Hz).
             "heatmap": grid.astype(np.float32).tolist(),
+            "heatmap_suppressed": grid_supp.astype(np.float32).tolist(),
             "memory": None,
         }
         if cursor_data:
@@ -326,6 +338,10 @@ class CompassProcessor:
         mx = float(disp.max())
         if mx > 0:
             disp = disp / mx
+            if self.mem_display_floor > 0:
+                disp[disp < self.mem_display_floor] = 0.0
+                if float(disp.max()) <= 0:
+                    return None
         return disp
 
 
@@ -430,6 +446,7 @@ class CompassServer:
 
                             if not self.include_heatmaps:
                                 frame.pop("heatmap", None)
+                                frame.pop("heatmap_suppressed", None)
                                 frame.pop("memory", None)
 
                             await self.broadcast({"type": "compass_frame", **frame})

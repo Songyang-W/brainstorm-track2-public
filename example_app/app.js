@@ -13,8 +13,10 @@ let gridSize = 32;
 
 // Heatmap state (for debug view)
 let liveCanvas, liveCtx, liveOff, liveOffCtx;
+let suppCanvas, suppCtx, suppOff, suppOffCtx;
 let memCanvas, memCtx, memOff, memOffCtx;
 let liveMax = 1.0;
+let suppMax = 1.0;
 let memMax = 1.0;
 
 // DOM elements
@@ -152,6 +154,9 @@ function updateDistanceBar(distance, maxDist = 15) {
   // Distance of 0 = on target (right side), high distance = far (left side)
   const pct = clamp(1 - (distance / maxDist), 0, 1) * 100;
   dom.distanceMarker.style.left = `${pct}%`;
+  if (dom.distanceFill) {
+    dom.distanceFill.style.width = `${100 - pct}%`;
+  }
 }
 
 // ============================================
@@ -285,8 +290,14 @@ function updateUI(frame) {
     if (frame.heatmap) {
       liveMax = drawHeatmap(liveCtx, liveOffCtx, liveOff, frame.heatmap, liveMax);
     }
+    if (frame.heatmap_suppressed) {
+      suppMax = drawHeatmap(suppCtx, suppOffCtx, suppOff, frame.heatmap_suppressed, suppMax);
+    }
     if (frame.memory) {
       memMax = drawHeatmap(memCtx, memOffCtx, memOff, frame.memory, memMax);
+    } else if (memCtx) {
+      memCtx.clearRect(0, 0, memCanvas.width, memCanvas.height);
+      memMax = 1.0;
     }
   }
 }
@@ -325,6 +336,8 @@ function connect() {
         gridSize = data.grid_size ?? 32;
         liveOff.width = gridSize;
         liveOff.height = gridSize;
+        suppOff.width = gridSize;
+        suppOff.height = gridSize;
         memOff.width = gridSize;
         memOff.height = gridSize;
       }
@@ -355,9 +368,11 @@ function connect() {
 
 function reset() {
   liveMax = 1.0;
+  suppMax = 1.0;
   memMax = 1.0;
 
   if (liveCtx) liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+  if (suppCtx) suppCtx.clearRect(0, 0, suppCanvas.width, suppCanvas.height);
   if (memCtx) memCtx.clearRect(0, 0, memCanvas.width, memCanvas.height);
 
   dom.instructionText.textContent = isConnected ? "ACQUIRING" : "CONNECT";
@@ -417,17 +432,23 @@ function init() {
 
   // Setup canvases
   liveCanvas = $("heatmap-live");
+  suppCanvas = $("heatmap-suppressed");
   memCanvas = $("heatmap-memory");
   liveCtx = liveCanvas.getContext("2d");
+  suppCtx = suppCanvas.getContext("2d");
   memCtx = memCanvas.getContext("2d");
 
   liveOff = document.createElement("canvas");
+  suppOff = document.createElement("canvas");
   memOff = document.createElement("canvas");
   liveOff.width = gridSize;
   liveOff.height = gridSize;
+  suppOff.width = gridSize;
+  suppOff.height = gridSize;
   memOff.width = gridSize;
   memOff.height = gridSize;
   liveOffCtx = liveOff.getContext("2d");
+  suppOffCtx = suppOff.getContext("2d");
   memOffCtx = memOff.getContext("2d");
 
   // Initial state

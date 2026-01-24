@@ -420,7 +420,7 @@ body {
   position: fixed;
   top: 60px;
   right: 20px;
-  width: 340px;
+  width: 420px;
   background: white;
   border-radius: 12px;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
@@ -448,7 +448,7 @@ body {
 
 .debug-heatmaps {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -520,6 +520,10 @@ body {
     right: 10px;
     left: 10px;
     width: auto;
+  }
+
+  .debug-heatmaps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .debug-metrics {
