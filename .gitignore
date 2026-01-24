@@ -20,6 +20,8 @@ wheels/
 .installed.cfg
 *.egg
 
+scripts/compass_model.pth
+
 # Virtual environments
 .venv/
 .venv.nosync/
