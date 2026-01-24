@@ -66,12 +66,6 @@ def _make_filterbank(fs: float, n_channels: int) -> FilterBank:
     )
 
 
-def _reshape_to_grid(channel_vec: np.ndarray, grid_size: int) -> np.ndarray:
-    grid = channel_vec.reshape(grid_size, grid_size)
-    # Empirically matches ground_truth coordinates in this repo.
-    return np.flipud(np.fliplr(grid))
-
-
 def _robust_z(vec: np.ndarray) -> np.ndarray:
     med = float(np.median(vec))
     mad = float(np.median(np.abs(vec - med))) + 1e-6
@@ -86,12 +80,16 @@ class CompassProcessor:
         grid_size: int,
         ema_tau_s: float = 0.20,
         spatial_sigma: float = 1.2,
+        channels_coords: list[list[int]] | None = None,
+        grid_transform: str = "rot180",
     ):
         self.fs = float(fs)
         self.n_channels = int(n_channels)
         self.grid_size = int(grid_size)
         self.spatial_sigma = float(spatial_sigma)
+        self.grid_transform = grid_transform
         self.fb = _make_filterbank(self.fs, self.n_channels)
+        self.channel_map = self._build_channel_map(channels_coords)
 
         self.ema_tau_s = float(ema_tau_s)
         self.ema = np.zeros((self.n_channels,), dtype=np.float32)
@@ -110,12 +108,43 @@ class CompassProcessor:
 
         # Kalman filter for smooth, dynamic center tracking.
         self.kalman = SimpleKalmanFilter2D(
-            process_noise=0.2,
-            measurement_noise=1.6,
+            process_noise=0.15,
+            measurement_noise=2.0,
             initial_pos=(self.grid_size / 2, self.grid_size / 2),
         )
         self.conf_alpha = 0.3
         self.conf_ema: float | None = None
+        self.mem_fallback_conf = 0.35
+
+    def _build_channel_map(self, channels_coords: list[list[int]] | None) -> np.ndarray | None:
+        if not channels_coords:
+            return None
+        coords = np.asarray(channels_coords, dtype=int)
+        if coords.shape[0] != self.n_channels or coords.shape[1] != 2:
+            return None
+        # coords are 1-indexed in stream; convert to 0-index.
+        rows = coords[:, 0] - 1
+        cols = coords[:, 1] - 1
+        if rows.min() < 0 or cols.min() < 0:
+            return None
+        grid = np.full((self.grid_size, self.grid_size), -1, dtype=int)
+        for ch, (r, c) in enumerate(zip(rows, cols)):
+            if 0 <= r < self.grid_size and 0 <= c < self.grid_size:
+                grid[r, c] = ch
+        if np.any(grid < 0):
+            return None
+        return grid
+
+    def _to_grid(self, channel_vec: np.ndarray) -> np.ndarray:
+        if self.channel_map is None:
+            grid = channel_vec.reshape(self.grid_size, self.grid_size)
+        else:
+            grid = channel_vec[self.channel_map]
+        if self.grid_transform == "rot180":
+            grid = np.flipud(np.fliplr(grid))
+        elif self.grid_transform != "none":
+            raise ValueError(f"Unknown grid_transform: {self.grid_transform}")
+        return grid
 
     def process_batch(
         self,
@@ -165,16 +194,24 @@ class CompassProcessor:
         z = np.maximum(z, 0.0)
         z = np.minimum(z, self.z_cap)
 
-        grid = _reshape_to_grid(z, self.grid_size)
+        grid = self._to_grid(z)
         grid = gaussian_filter(grid, sigma=self.spatial_sigma)
 
         cr, cc, conf, memory, spots, track_states = self.tracker.update(grid, dt_s=dt)
         if cr is None or cc is None:
             return None
 
+        mem_r, mem_c = self.tracker.memory_center()
+        if mem_r is not None and mem_c is not None and conf < self.mem_fallback_conf:
+            w = float(np.clip(conf / max(1e-3, self.mem_fallback_conf), 0.0, 1.0))
+            meas_r = w * float(cr) + (1.0 - w) * float(mem_r)
+            meas_c = w * float(cc) + (1.0 - w) * float(mem_c)
+        else:
+            meas_r, meas_c = float(cr), float(cc)
+
         # Kalman smoothing for dynamic stability.
         self.kalman.predict(dt=dt)
-        self.kalman.update(np.array([cr, cc], dtype=float), confidence=max(0.1, conf))
+        self.kalman.update(np.array([meas_r, meas_c], dtype=float), confidence=max(0.1, conf))
         smooth_cr, smooth_cc = self.kalman.position
         smooth_cr = float(np.clip(smooth_cr, 0.0, self.grid_size - 1.0))
         smooth_cc = float(np.clip(smooth_cc, 0.0, self.grid_size - 1.0))
@@ -244,6 +281,7 @@ class CompassServer:
         include_heatmaps: bool,
         ema_tau_s: float,
         spatial_sigma: float,
+        grid_transform: str,
     ):
         self.stream_url = stream_url
         self.host = host
@@ -252,6 +290,7 @@ class CompassServer:
         self.include_heatmaps = include_heatmaps
         self.ema_tau_s = float(ema_tau_s)
         self.spatial_sigma = float(spatial_sigma)
+        self.grid_transform = grid_transform
         self.clients: set[websockets.WebSocketServerProtocol] = set()
         self.processor: CompassProcessor | None = None
         self._last_send = 0.0
@@ -304,13 +343,16 @@ class CompassServer:
                         if data.get("type") == "init":
                             fs = float(data.get("fs", 500.0))
                             grid_size = int(data.get("grid_size", 32))
-                            n_channels = len(data.get("channels_coords", [])) or 1024
+                            channels_coords = data.get("channels_coords")
+                            n_channels = len(channels_coords or []) or 1024
                             self.processor = CompassProcessor(
                                 fs=fs,
                                 n_channels=n_channels,
                                 grid_size=grid_size,
                                 ema_tau_s=self.ema_tau_s,
                                 spatial_sigma=self.spatial_sigma,
+                                channels_coords=channels_coords,
+                                grid_transform=self.grid_transform,
                             )
                         elif data.get("type") == "sample_batch" and self.processor is not None:
                             batch = np.asarray(data["neural_data"], dtype=np.float32)
@@ -370,6 +412,9 @@ def main(
     spatial_sigma: float = typer.Option(
         1.2, help="Spatial Gaussian smoothing sigma (grid units)"
     ),
+    grid_transform: str = typer.Option(
+        "rot180", help="Grid transform: rot180 or none"
+    ),
 ) -> None:
     """Run the realtime compass processing backend."""
     server = CompassServer(
@@ -380,6 +425,7 @@ def main(
         include_heatmaps=heatmaps,
         ema_tau_s=ema_tau_s,
         spatial_sigma=spatial_sigma,
+        grid_transform=grid_transform,
     )
     asyncio.run(server.run())
 

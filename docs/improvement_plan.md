@@ -39,17 +39,19 @@ does not assume fixed Vx/Vy regions. It:
 - keeps a persistent set of peak tracks (interpretable anchors)
 - outputs a confidence based on track strength + count
 - maintains a long-memory map for debug UI
+- uses memory as a fallback anchor when confidence is low
 
 ### 4. Signal Conditioning for Hard Mode
 
 - 60/120 Hz notch filters to suppress line noise + harmonic
 - Persistent bad-channel detection to mask dead/artifact channels
 - Optional cursor velocity passthrough for live demos
+- Channel coordinate mapping from stream init (no more hard-coded ordering)
 
 ### 5. Code Changes
 
 **Files modified**:
-- `scripts/hotspot_tracker.py` - Added `InterpretableClusterTracker` and `track_states`
+- `scripts/hotspot_tracker.py` - Trimmed to core tracker utilities only
 - `scripts/compass_backend.py` - Integrated new tracker, bad-channel masking, 60/120 Hz notch filtering, cursor passthrough
 - `example_app/index.html` - New simplified layout
 - `example_app/style.css` - New clinical light theme
@@ -59,10 +61,13 @@ does not assume fixed Vx/Vy regions. It:
 
 | Dataset | center_rmse | move_cos median |
 |---------|-------------|----------------|
-| medium | 3.639 | 0.971 |
-| hard | 3.954 | 0.950 |
+| medium | 3.531 | 0.979 |
+| hard | 3.520 | 0.951 |
 
 These defaults are tuned for noisy `medium`/`hard` data while keeping the UI stable.
+
+Evaluation now uses time-interpolated ground truth (instead of nearest sample)
+to reduce timing bias at batch boundaries.
 
 ## UI States
 

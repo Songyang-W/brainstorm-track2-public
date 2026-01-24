@@ -259,8 +259,12 @@ function updateUI(frame) {
     dom.instructionDetail.textContent = `Distance: ${dist.toFixed(1)} units`;
   }
 
-  // Update arrow
-  updateArrow(mvR, mvC, onTarget);
+  // Update arrow (suppress when confidence is low)
+  if (acquiring && !onTarget) {
+    updateArrow(0, 0, false);
+  } else {
+    updateArrow(mvR, mvC, onTarget);
+  }
 
   // Update distance bar
   updateDistanceBar(dist);

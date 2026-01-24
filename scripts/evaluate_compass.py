@@ -17,7 +17,6 @@ import pandas as pd
 import typer
 
 from scripts.compass_backend import CompassProcessor
-from scripts.hotspot_tracker import compute_ground_truth_center, _get_gt_time_array
 
 app = typer.Typer(help="Evaluate CompassProcessor against ground_truth (dev only).")
 
@@ -59,12 +58,48 @@ def _metrics(err: np.ndarray, cos: np.ndarray) -> Metrics:
     )
 
 
+def _interp_series(t: np.ndarray, y: np.ndarray, t_s: float) -> float:
+    return float(np.interp(t_s, t, y))
+
+
+def _interp_center(gt: pd.DataFrame, t_s: float) -> tuple[float | None, float | None]:
+    if "time_s" in gt.columns:
+        t = gt["time_s"].values
+    else:
+        t = gt.index.values
+
+    if "click_center_row" in gt.columns and "click_center_col" in gt.columns:
+        r = _interp_series(t, gt["click_center_row"].values, t_s)
+        c = _interp_series(t, gt["click_center_col"].values, t_s)
+        # Detect indexing based on full column range.
+        shift = 1.0 if float(gt["click_center_row"].min()) >= 1.0 else 0.0
+        return r - shift, c - shift
+
+    # Fallback: average velocity region centers if click center missing.
+    cols = [
+        ("vx_pos_center_row", "vx_pos_center_col"),
+        ("vx_neg_center_row", "vx_neg_center_col"),
+        ("vy_pos_center_row", "vy_pos_center_col"),
+        ("vy_neg_center_row", "vy_neg_center_col"),
+    ]
+    rows = []
+    cols_out = []
+    for r_col, c_col in cols:
+        if r_col in gt.columns and c_col in gt.columns:
+            rows.append(_interp_series(t, gt[r_col].values, t_s))
+            cols_out.append(_interp_series(t, gt[c_col].values, t_s))
+    if not rows:
+        return None, None
+    shift = 1.0 if min(rows) >= 1.0 else 0.0
+    return float(np.mean(rows) - shift), float(np.mean(cols_out) - shift)
+
+
 @app.command()
 def main(
     dataset: str = typer.Argument("super_easy", help="Dataset folder under data/"),
     seconds: float = typer.Option(30.0, help="Seconds to evaluate from start"),
     batch_size: int = typer.Option(10, help="Samples per batch (matches stream messages)"),
-    ema_tau_s: float = typer.Option(0.35, help="EMA time constant (seconds)"),
+    ema_tau_s: float = typer.Option(0.20, help="EMA time constant (seconds)"),
     spatial_sigma: float = typer.Option(1.2, help="Spatial smoothing sigma"),
 ) -> None:
     data_path = f"data/{dataset}"
@@ -78,7 +113,6 @@ def main(
 
     proc = CompassProcessor(fs=fs, n_channels=data.shape[1], grid_size=32, ema_tau_s=ema_tau_s, spatial_sigma=spatial_sigma)
 
-    gt_t = _get_gt_time_array(gt)
     mid = (32 - 1) / 2.0
 
     est = []
@@ -91,8 +125,7 @@ def main(
         if frame is None:
             continue
 
-        gt_idx = int(np.abs(gt_t - t_s).argmin())
-        tr, tc, _ = compute_ground_truth_center(gt, gt_idx)
+        tr, tc = _interp_center(gt, t_s)
         if tr is None or tc is None:
             continue
 
