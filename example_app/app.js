@@ -7,8 +7,13 @@
 
 // State
 let ws = null;
+let controlWs = null;
 let isConnected = false;
+let isControlConnected = false;
 let gridSize = 32;
+
+// Track pressed keys to avoid repeat events
+let pressedKeys = new Set();
 
 // Array Canvas
 let canvas = null;
@@ -17,13 +22,13 @@ const canvasSize = 576; // 32 * 18
 const cellSize = canvasSize / 32;
 const padding = 16;
 
-// Global Map Canvas
-let globalCanvas = null;
-let globalCtx = null;
-const globalCanvasSize = 384; // 48 * 8 (downsampled size)
-const globalCellSize = globalCanvasSize / 48;
-const globalMapSize = 96; // Full map size
-const globalDisplaySize = 48; // Downsampled for display
+// Global Map Canvas (REMOVED)
+// let globalCanvas = null;
+// let globalCtx = null;
+// const globalCanvasSize = 384;
+// const globalCellSize = globalCanvasSize / 48;
+// const globalMapSize = 96;
+// const globalDisplaySize = 48;
 
 // Velocity Graph Canvas
 let velocityCanvas = null;
@@ -109,18 +114,7 @@ function initCanvas() {
     ctx.fillRect(0, 0, canvasSize, canvasSize);
 }
 
-function initGlobalCanvas() {
-    globalCanvas = document.getElementById('global-canvas');
-    globalCtx = globalCanvas.getContext('2d');
-
-    // Set canvas size
-    globalCanvas.width = globalCanvasSize;
-    globalCanvas.height = globalCanvasSize;
-
-    // Clear canvas
-    globalCtx.fillStyle = '#0a0a0f';
-    globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
-}
+// function initGlobalCanvas() { /* REMOVED */ }
 
 function initVelocityCanvas() {
     velocityCanvas = document.getElementById('velocity-graph');
@@ -418,156 +412,156 @@ function renderGroundTruthOverlay(groundTruth) {
     }
 }
 
-// Global map colormap (dark -> cyan -> green for visited areas)
-function globalEvidenceToColor(value, confidence) {
-    // Base color from evidence
-    const v = Math.max(0, Math.min(1, value));
-    const c = Math.max(0, Math.min(1, confidence));
+// Global map colormap (dark -> cyan -> green for visited areas) - DISABLED
+// function globalEvidenceToColor(value, confidence) {
+//     // Base color from evidence
+//     const v = Math.max(0, Math.min(1, value));
+//     const c = Math.max(0, Math.min(1, confidence));
+//
+//     if (c < 0.1) {
+//         // Unexplored - dark gray
+//         return 'rgb(20, 20, 30)';
+//     }
+//
+//     // Blend based on evidence
+//     if (v < 0.3) {
+//         // Low evidence - dim cyan
+//         const intensity = 40 + v * 100;
+//         return `rgb(${Math.round(intensity * 0.3)}, ${Math.round(intensity * 0.5)}, ${Math.round(intensity * 0.6)})`;
+//     } else if (v < 0.6) {
+//         // Medium evidence - cyan to green
+//         const t = (v - 0.3) / 0.3;
+//         const r = Math.round(34 * (1 - t) + 34 * t);
+//         const g = Math.round(211 * (1 - t) + 197 * t);
+//         const b = Math.round(238 * (1 - t) + 94 * t);
+//         return `rgb(${r}, ${g}, ${b})`;
+//     } else {
+//         // High evidence - bright green to yellow
+//         const t = (v - 0.6) / 0.4;
+//         const r = Math.round(34 + (250 - 34) * t);
+//         const g = Math.round(197 + (204 - 197) * t);
+//         const b = Math.round(94 + (21 - 94) * t);
+//         return `rgb(${r}, ${g}, ${b})`;
+//     }
+// }
 
-    if (c < 0.1) {
-        // Unexplored - dark gray
-        return 'rgb(20, 20, 30)';
-    }
+// function renderGlobalMap(globalMapping) {
+//     if (!globalMapping || !globalCtx) return;
+//
+//     const evidence = globalMapping.global_evidence;
+//     const confidence = globalMapping.global_confidence;
+//
+//     if (!evidence || !confidence) return;
+//
+//     // Clear canvas
+//     globalCtx.fillStyle = '#0a0a0f';
+//     globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
+//
+//     // Draw each cell
+//     const displaySize = evidence.length; // 48x48
+//     const cellDisplaySize = globalCanvasSize / displaySize;
+//
+//     // Flip both axes to match array view coordinate system
+//     for (let row = 0; row < displaySize; row++) {
+//         for (let col = 0; col < displaySize; col++) {
+//             const x = (displaySize - 1 - col) * cellDisplaySize;
+//             const y = (displaySize - 1 - row) * cellDisplaySize;
+//             const evidenceVal = evidence[row][col];
+//             const confidenceVal = confidence[row][col];
+//
+//             globalCtx.fillStyle = globalEvidenceToColor(evidenceVal, confidenceVal);
+//
+//             // Draw cell
+//             globalCtx.fillRect(x, y, cellDisplaySize - 0.5, cellDisplaySize - 0.5);
+//         }
+//     }
+//
+//     // Draw hotspots
+//     if (globalMapping.hotspots) {
+//         for (const hotspot of globalMapping.hotspots) {
+//             const [gRow, gCol] = hotspot.global_position;
+//             // Convert from 96x96 to 48x48 display coordinates, then flip
+//             const displayRow = gRow / 2;
+//             const displayCol = gCol / 2;
+//             const x = (displaySize - 1 - displayCol) * cellDisplaySize;
+//             const y = (displaySize - 1 - displayRow) * cellDisplaySize;
+//
+//             // Draw hotspot circle
+//             globalCtx.beginPath();
+//             globalCtx.arc(x, y, 6, 0, 2 * Math.PI);
+//             globalCtx.strokeStyle = '#facc15';
+//             globalCtx.lineWidth = 2;
+//             globalCtx.stroke();
+//
+//             // Add glow effect
+//             globalCtx.shadowColor = 'rgba(250, 204, 21, 0.6)';
+//             globalCtx.shadowBlur = 8;
+//             globalCtx.beginPath();
+//             globalCtx.arc(x, y, 4, 0, 2 * Math.PI);
+//             globalCtx.fillStyle = '#facc15';
+//             globalCtx.fill();
+//             globalCtx.shadowBlur = 0;
+//         }
+//     }
+// }
 
-    // Blend based on evidence
-    if (v < 0.3) {
-        // Low evidence - dim cyan
-        const intensity = 40 + v * 100;
-        return `rgb(${Math.round(intensity * 0.3)}, ${Math.round(intensity * 0.5)}, ${Math.round(intensity * 0.6)})`;
-    } else if (v < 0.6) {
-        // Medium evidence - cyan to green
-        const t = (v - 0.3) / 0.3;
-        const r = Math.round(34 * (1 - t) + 34 * t);
-        const g = Math.round(211 * (1 - t) + 197 * t);
-        const b = Math.round(238 * (1 - t) + 94 * t);
-        return `rgb(${r}, ${g}, ${b})`;
-    } else {
-        // High evidence - bright green to yellow
-        const t = (v - 0.6) / 0.4;
-        const r = Math.round(34 + (250 - 34) * t);
-        const g = Math.round(197 + (204 - 197) * t);
-        const b = Math.round(94 + (21 - 94) * t);
-        return `rgb(${r}, ${g}, ${b})`;
-    }
-}
+// function updateArrayPositionIndicator(globalMapping) {
+//     const indicator = document.getElementById('array-indicator');
+//     const wrapper = document.querySelector('.global-canvas-wrapper');
+//
+//     if (!globalMapping || !globalMapping.array_bounds) {
+//         indicator.style.display = 'none';
+//         return;
+//     }
+//
+//     const [r1, c1, r2, c2] = globalMapping.array_bounds;
+//
+//     // Convert from 96x96 global coords to display coords, flipped to match array view
+//     const scale = globalCanvasSize / globalMapSize;
+//     // Flip: x = (globalMapSize - c2) * scale, y = (globalMapSize - r2) * scale
+//     const x = (globalMapSize - c2) * scale + 16; // +16 for padding
+//     const y = (globalMapSize - r2) * scale + 16;
+//     const width = (c2 - c1) * scale;
+//     const height = (r2 - r1) * scale;
+//
+//     indicator.style.left = `${x}px`;
+//     indicator.style.top = `${y}px`;
+//     indicator.style.width = `${width}px`;
+//     indicator.style.height = `${height}px`;
+//     indicator.style.display = 'block';
+// }
 
-function renderGlobalMap(globalMapping) {
-    if (!globalMapping || !globalCtx) return;
-
-    const evidence = globalMapping.global_evidence;
-    const confidence = globalMapping.global_confidence;
-
-    if (!evidence || !confidence) return;
-
-    // Clear canvas
-    globalCtx.fillStyle = '#0a0a0f';
-    globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
-
-    // Draw each cell
-    const displaySize = evidence.length; // 48x48
-    const cellDisplaySize = globalCanvasSize / displaySize;
-
-    // Flip both axes to match array view coordinate system
-    for (let row = 0; row < displaySize; row++) {
-        for (let col = 0; col < displaySize; col++) {
-            const x = (displaySize - 1 - col) * cellDisplaySize;
-            const y = (displaySize - 1 - row) * cellDisplaySize;
-            const evidenceVal = evidence[row][col];
-            const confidenceVal = confidence[row][col];
-
-            globalCtx.fillStyle = globalEvidenceToColor(evidenceVal, confidenceVal);
-
-            // Draw cell
-            globalCtx.fillRect(x, y, cellDisplaySize - 0.5, cellDisplaySize - 0.5);
-        }
-    }
-
-    // Draw hotspots
-    if (globalMapping.hotspots) {
-        for (const hotspot of globalMapping.hotspots) {
-            const [gRow, gCol] = hotspot.global_position;
-            // Convert from 96x96 to 48x48 display coordinates, then flip
-            const displayRow = gRow / 2;
-            const displayCol = gCol / 2;
-            const x = (displaySize - 1 - displayCol) * cellDisplaySize;
-            const y = (displaySize - 1 - displayRow) * cellDisplaySize;
-
-            // Draw hotspot circle
-            globalCtx.beginPath();
-            globalCtx.arc(x, y, 6, 0, 2 * Math.PI);
-            globalCtx.strokeStyle = '#facc15';
-            globalCtx.lineWidth = 2;
-            globalCtx.stroke();
-
-            // Add glow effect
-            globalCtx.shadowColor = 'rgba(250, 204, 21, 0.6)';
-            globalCtx.shadowBlur = 8;
-            globalCtx.beginPath();
-            globalCtx.arc(x, y, 4, 0, 2 * Math.PI);
-            globalCtx.fillStyle = '#facc15';
-            globalCtx.fill();
-            globalCtx.shadowBlur = 0;
-        }
-    }
-}
-
-function updateArrayPositionIndicator(globalMapping) {
-    const indicator = document.getElementById('array-indicator');
-    const wrapper = document.querySelector('.global-canvas-wrapper');
-
-    if (!globalMapping || !globalMapping.array_bounds) {
-        indicator.style.display = 'none';
-        return;
-    }
-
-    const [r1, c1, r2, c2] = globalMapping.array_bounds;
-
-    // Convert from 96x96 global coords to display coords, flipped to match array view
-    const scale = globalCanvasSize / globalMapSize;
-    // Flip: x = (globalMapSize - c2) * scale, y = (globalMapSize - r2) * scale
-    const x = (globalMapSize - c2) * scale + 16; // +16 for padding
-    const y = (globalMapSize - r2) * scale + 16;
-    const width = (c2 - c1) * scale;
-    const height = (r2 - r1) * scale;
-
-    indicator.style.left = `${x}px`;
-    indicator.style.top = `${y}px`;
-    indicator.style.width = `${width}px`;
-    indicator.style.height = `${height}px`;
-    indicator.style.display = 'block';
-}
-
-function updateExplorationDisplay(globalMapping) {
-    if (!globalMapping) return;
-
-    // Update exploration bar
-    const coverage = globalMapping.exploration_coverage || 0;
-    const coveragePercent = Math.round(coverage * 100);
-    document.getElementById('exploration-bar').style.width = `${coveragePercent}%`;
-    document.getElementById('exploration-value').textContent = `${coveragePercent}%`;
-
-    // Update exploration suggestion
-    const suggestion = globalMapping.exploration_suggestion;
-    const suggestionEl = document.getElementById('suggestion-value');
-    if (suggestion) {
-        suggestionEl.textContent = suggestion.toUpperCase();
-        suggestionEl.style.color = '#f97316';
-    } else {
-        suggestionEl.textContent = 'COMPLETE';
-        suggestionEl.style.color = '#22c55e';
-    }
-
-    // Update array position display
-    if (globalMapping.array_position) {
-        const [row, col] = globalMapping.array_position;
-        document.getElementById('array-position-value').textContent =
-            `(${row.toFixed(1)}, ${col.toFixed(1)})`;
-    }
-
-    // Update global hotspot count
-    const hotspotCount = globalMapping.hotspots ? globalMapping.hotspots.length : 0;
-    document.getElementById('global-hotspot-count').textContent = hotspotCount;
-}
+// function updateExplorationDisplay(globalMapping) {
+//     if (!globalMapping) return;
+//
+//     // Update exploration bar
+//     const coverage = globalMapping.exploration_coverage || 0;
+//     const coveragePercent = Math.round(coverage * 100);
+//     document.getElementById('exploration-bar').style.width = `${coveragePercent}%`;
+//     document.getElementById('exploration-value').textContent = `${coveragePercent}%`;
+//
+//     // Update exploration suggestion
+//     const suggestion = globalMapping.exploration_suggestion;
+//     const suggestionEl = document.getElementById('suggestion-value');
+//     if (suggestion) {
+//         suggestionEl.textContent = suggestion.toUpperCase();
+//         suggestionEl.style.color = '#f97316';
+//     } else {
+//         suggestionEl.textContent = 'COMPLETE';
+//         suggestionEl.style.color = '#22c55e';
+//     }
+//
+//     // Update array position display
+//     if (globalMapping.array_position) {
+//         const [row, col] = globalMapping.array_position;
+//         document.getElementById('array-position-value').textContent =
+//             `(${row.toFixed(1)}, ${col.toFixed(1)})`;
+//     }
+//
+//     // Update global hotspot count
+//     const hotspotCount = globalMapping.hotspots ? globalMapping.hotspots.length : 0;
+//     document.getElementById('global-hotspot-count').textContent = hotspotCount;
+// }
 
 function updateCentroidMarker(centroid) {
     const marker = document.getElementById('centroid-marker');
@@ -793,12 +787,12 @@ function processMessage(data) {
             updateVelocityGraph(vx, vy);
         }
 
-        // Render global brain map
-        if (data.global_mapping) {
-            renderGlobalMap(data.global_mapping);
-            updateArrayPositionIndicator(data.global_mapping);
-            updateExplorationDisplay(data.global_mapping);
-        }
+        // Render global brain map (DISABLED)
+        // if (data.global_mapping) {
+        //     renderGlobalMap(data.global_mapping);
+        //     updateArrayPositionIndicator(data.global_mapping);
+        //     updateExplorationDisplay(data.global_mapping);
+        // }
 
         // Update centroid marker
         updateCentroidMarker(data.centroid);
@@ -861,16 +855,163 @@ function connect() {
     }
 }
 
+// ===== KEYBOARD CONTROL =====
+
+function connectControl() {
+    const url = document.getElementById('control-url').value;
+
+    if (isControlConnected && controlWs) {
+        controlWs.close();
+        return;
+    }
+
+    updateControlStatus('connecting');
+
+    try {
+        controlWs = new WebSocket(url);
+
+        controlWs.onopen = () => {
+            console.log('Control WebSocket connected');
+            updateControlStatus('connected');
+        };
+
+        controlWs.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'control_ack') {
+                    console.log('Control acknowledged');
+                }
+            } catch (err) {
+                // Ignore parse errors for control messages
+            }
+        };
+
+        controlWs.onerror = (error) => {
+            console.error('Control WebSocket error:', error);
+            updateControlStatus('disconnected');
+        };
+
+        controlWs.onclose = () => {
+            console.log('Control WebSocket closed');
+            updateControlStatus('disconnected');
+            controlWs = null;
+        };
+
+    } catch (err) {
+        console.error('Failed to create control WebSocket:', err);
+        updateControlStatus('disconnected');
+    }
+}
+
+function updateControlStatus(status) {
+    const indicator = document.getElementById('control-status-indicator');
+    const statusText = document.getElementById('control-status-text');
+    const connectBtn = document.getElementById('control-connect-btn');
+
+    if (!indicator) return;
+
+    indicator.className = 'status-indicator';
+
+    switch (status) {
+        case 'connected':
+            indicator.classList.add('connected');
+            statusText.textContent = 'Controls: ON';
+            connectBtn.textContent = 'Disable';
+            connectBtn.classList.add('disconnect');
+            connectBtn.disabled = false;
+            isControlConnected = true;
+            break;
+        case 'connecting':
+            indicator.classList.add('connecting');
+            statusText.textContent = 'Controls: ...';
+            connectBtn.disabled = true;
+            break;
+        case 'disconnected':
+        default:
+            statusText.textContent = 'Controls: OFF';
+            connectBtn.textContent = 'Enable';
+            connectBtn.classList.remove('disconnect');
+            connectBtn.disabled = false;
+            isControlConnected = false;
+            break;
+    }
+}
+
+function sendKeyEvent(key, pressed) {
+    if (!isControlConnected || !controlWs) return;
+
+    const message = {
+        type: 'key',
+        key: key,
+        pressed: pressed
+    };
+
+    try {
+        controlWs.send(JSON.stringify(message));
+        updateKeyIndicator(key, pressed);
+    } catch (err) {
+        console.error('Error sending key event:', err);
+    }
+}
+
+function updateKeyIndicator(key, pressed) {
+    const keyEl = document.getElementById(`key-${key}`);
+    if (keyEl) {
+        if (pressed) {
+            keyEl.classList.add('active');
+        } else {
+            keyEl.classList.remove('active');
+        }
+    }
+}
+
+function handleKeyDown(event) {
+    // Only handle arrow keys
+    const keyMap = {
+        'ArrowUp': 'up',
+        'ArrowDown': 'down',
+        'ArrowLeft': 'left',
+        'ArrowRight': 'right'
+    };
+
+    const key = keyMap[event.key];
+    if (!key) return;
+
+    // Prevent default scrolling behavior
+    event.preventDefault();
+
+    // Avoid repeat events when key is held
+    if (pressedKeys.has(key)) return;
+    pressedKeys.add(key);
+
+    sendKeyEvent(key, true);
+}
+
+function handleKeyUp(event) {
+    const keyMap = {
+        'ArrowUp': 'up',
+        'ArrowDown': 'down',
+        'ArrowLeft': 'left',
+        'ArrowRight': 'right'
+    };
+
+    const key = keyMap[event.key];
+    if (!key) return;
+
+    pressedKeys.delete(key);
+    sendKeyEvent(key, false);
+}
+
 function reset() {
     // Clear the array canvas
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, canvasSize, canvasSize);
 
-    // Clear the global canvas
-    if (globalCtx) {
-        globalCtx.fillStyle = '#0a0a0f';
-        globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
-    }
+    // Clear the global canvas (DISABLED)
+    // if (globalCtx) {
+    //     globalCtx.fillStyle = '#0a0a0f';
+    //     globalCtx.fillRect(0, 0, globalCanvasSize, globalCanvasSize);
+    // }
 
     // Clear velocity history and canvas
     vxHistory = [];
@@ -887,22 +1028,22 @@ function reset() {
     document.getElementById('time-display').textContent = 't = 0.00s';
     document.getElementById('signal-quality').textContent = 'Signal: --';
 
-    // Reset global map UI
-    document.getElementById('exploration-bar').style.width = '0%';
-    document.getElementById('exploration-value').textContent = '0%';
-    document.getElementById('suggestion-value').textContent = '--';
-    document.getElementById('array-position-value').textContent = '(0, 0)';
-    document.getElementById('global-hotspot-count').textContent = '0';
+    // Reset global map UI (DISABLED)
+    // document.getElementById('exploration-bar').style.width = '0%';
+    // document.getElementById('exploration-value').textContent = '0%';
+    // document.getElementById('suggestion-value').textContent = '--';
+    // document.getElementById('array-position-value').textContent = '(0, 0)';
+    // document.getElementById('global-hotspot-count').textContent = '0';
 
     // Hide indicators
     document.getElementById('centroid-marker').classList.remove('visible');
     document.getElementById('center-marker').classList.remove('centered');
-    document.getElementById('array-indicator').style.display = 'none';
+    // document.getElementById('array-indicator').style.display = 'none';
 }
 
 function init() {
     initCanvas();
-    initGlobalCanvas();
+    // initGlobalCanvas(); // REMOVED
     initVelocityCanvas();
 
     // Connect button handler
@@ -922,6 +1063,24 @@ function init() {
         if (e.key === 'Enter') {
             connect();
         }
+    });
+
+    // Control connection button handler
+    const controlBtn = document.getElementById('control-connect-btn');
+    if (controlBtn) {
+        controlBtn.addEventListener('click', connectControl);
+    }
+
+    // Keyboard event listeners for arrow keys
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+
+    // Clear pressed keys when window loses focus
+    window.addEventListener('blur', () => {
+        for (const key of pressedKeys) {
+            sendKeyEvent(key, false);
+        }
+        pressedKeys.clear();
     });
 }
 

@@ -52,26 +52,6 @@
                     </div>
                 </div>
 
-                <!-- Global Brain Map -->
-                <div class="global-map-section">
-                    <div class="section-label">GLOBAL BRAIN MAP</div>
-                    <div class="global-canvas-wrapper">
-                        <canvas id="global-canvas"></canvas>
-                        <div class="array-position-indicator" id="array-indicator"></div>
-                    </div>
-                    <div class="exploration-bar-container">
-                        <span class="exploration-label">Explored:</span>
-                        <div class="exploration-bar-outer">
-                            <div class="exploration-bar-inner" id="exploration-bar"></div>
-                        </div>
-                        <span class="exploration-value" id="exploration-value">0%</span>
-                    </div>
-                    <div class="exploration-suggestion" id="exploration-suggestion">
-                        <span class="suggestion-label">Unexplored:</span>
-                        <span class="suggestion-value" id="suggestion-value">--</span>
-                    </div>
-                </div>
-
                 <!-- Guidance Panel -->
                 <div class="guidance-section">
                     <div class="section-label">GUIDANCE</div>
@@ -164,6 +144,27 @@
                 <button id="connect-btn">Connect</button>
                 <button id="reset-btn" class="secondary">Reset</button>
                 <button id="gt-toggle-btn" class="secondary active">Hide GT</button>
+
+                <div class="control-divider"></div>
+
+                <div class="control-group">
+                    <label for="control-url">Control URL:</label>
+                    <input type="text" id="control-url" value="ws://localhost:8765/control">
+                </div>
+                <button id="control-connect-btn" class="secondary">Enable</button>
+                <span class="status-indicator" id="control-status-indicator"></span>
+                <span id="control-status-text" class="control-status-text">Controls: OFF</span>
+
+                <div class="keyboard-indicator">
+                    <div class="key-row">
+                        <div class="key" id="key-up">&#9650;</div>
+                    </div>
+                    <div class="key-row">
+                        <div class="key" id="key-left">&#9664;</div>
+                        <div class="key" id="key-down">&#9660;</div>
+                        <div class="key" id="key-right">&#9654;</div>
+                    </div>
+                </div>
             </div>
             <div class="legend">
                 <div class="legend-item">
