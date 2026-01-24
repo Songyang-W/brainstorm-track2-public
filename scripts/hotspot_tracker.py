@@ -128,17 +128,26 @@ class VelocityTracker:
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         num_targets = len(contours)
         
-        # Compute intensity-weighted center of mass of entire grid
-        total_intensity = denoised_grid.sum()
+        # Use SQUARED intensity for center of mass (exaggerates bright hotspots)
+        # This makes the COM pull more strongly toward high-intensity regions
+        weighted_grid = denoised_grid ** 2
+        
+        total_intensity = weighted_grid.sum()
         
         if total_intensity > 0.01:
             rows, cols = np.mgrid[0:32, 0:32]
-            avg_row = (rows * denoised_grid).sum() / total_intensity
-            avg_col = (cols * denoised_grid).sum() / total_intensity
+            avg_row = (rows * weighted_grid).sum() / total_intensity
+            avg_col = (cols * weighted_grid).sum() / total_intensity
             
             # Convert to velocity (center is 15.5, 15.5)
+            # Exaggerate the displacement from center with power function
             raw_vx = (avg_col - 15.5) / 15.5
             raw_vy = -(avg_row - 15.5) / 15.5  # Negative because row 0 is top
+            
+            # Exaggerate small displacements (sign-preserving power < 1)
+            exaggeration = 0.6  # Lower = more exaggeration
+            raw_vx = np.sign(raw_vx) * (np.abs(raw_vx) ** exaggeration)
+            raw_vy = np.sign(raw_vy) * (np.abs(raw_vy) ** exaggeration)
             
             # Smooth velocity
             vx = self.smoothing_alpha * raw_vx + (1 - self.smoothing_alpha) * self.prev_vx
@@ -173,7 +182,7 @@ class VelocityTracker:
 # =============================================================================
 # 4. MAIN REAL-TIME LOOP
 # =============================================================================
-def load_data(difficulty="super_easy"):
+def load_data(difficulty="hard"):
     """Load neural data and ground truth."""
     data_path = Path(f"data/{difficulty}")
     
@@ -331,7 +340,7 @@ def run_realtime_tracking(data, ground_truth, model_path="scripts/compass_model.
                        markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
         
         # Draw detected targets (green circles)
-        _, mask = cv2.threshold(denoised_grid.astype(np.float32), 0.2, 1.0, cv2.THRESH_BINARY)
+        _, mask = cv2.threshold(denoised_grid.astype(np.float32), 0.5, 1.0, cv2.THRESH_BINARY)
         mask_uint8 = (mask * 255).astype(np.uint8)
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -491,7 +500,7 @@ if __name__ == "__main__":
     print("\nPipeline: Raw → DSP Filter → UNet → Velocity (all in one loop)")
     
     # Load data
-    data, ground_truth = load_data("super_easy")
+    data, ground_truth = load_data("hard")
     
     # Run real-time tracking
     predictions = run_realtime_tracking(

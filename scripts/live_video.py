@@ -63,7 +63,7 @@ class MedicalUNet(nn.Module):
 
 # ==========================================
 # 3. SETUP
-FILE_PATH = 'data/super_easy/track2_data.parquet' 
+FILE_PATH = 'data/hard/track2_data.parquet' 
 MODEL_PATH = 'scripts/compass_model.pth'
 
 TARGET_FPS = 30
