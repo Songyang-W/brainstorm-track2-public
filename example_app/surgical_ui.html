@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IonPath - BCI Placement</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #f5f5f5;
+            --bg-card: #ffffff;
+            --text-primary: #333333;
+            --text-secondary: #666666;
+            --text-muted: #999999;
+            --accent-teal: #4a9b9b;
+            --accent-coral: #e07a5f;
+            --success-green: #4CAF50;
+            --shadow-subtle: 0 2px 8px rgba(0, 0, 0, 0.05);
+            --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.08);
+            --radius: 8px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        .container {
+            max-width: 860px;
+            margin: 0 auto;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-subtle);
+            margin-bottom: 24px;
+        }
+
+        .top-bar-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .app-title {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .recording-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success-green);
+            border-radius: 50%;
+            animation: pulse-recording 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse-recording {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(1.2); }
+        }
+
+        .top-bar-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .signal-bar-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .signal-bar {
+            width: 120px;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .signal-bar-fill {
+            height: 100%;
+            width: 72%;
+            background: linear-gradient(90deg, var(--accent-teal), #6bb8b8);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .signal-percentage {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            min-width: 36px;
+        }
+
+        /* Main Layout */
+        .main-layout {
+            display: flex;
+            gap: 20px;
+        }
+
+        /* Left Side - Heatmap */
+        .heatmap-panel {
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-card);
+            padding: 20px;
+            flex-shrink: 0;
+        }
+
+        .heatmap-container {
+            position: relative;
+            width: 520px;
+            height: 520px;
+        }
+
+        #heatmap-canvas {
+            display: block;
+            width: 520px;
+            height: 520px;
+            border-radius: 6px;
+        }
+
+        /* Direction Arrow Overlay */
+        .arrow-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+
+        .arrow-overlay svg {
+            filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.35));
+        }
+
+        /* Right Side - Controls */
+        .controls-panel {
+            width: 240px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .control-card {
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-subtle);
+            padding: 16px;
+        }
+
+        /* Signal Quality */
+        .signal-quality-card {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .quality-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .quality-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            width: 50px;
+            letter-spacing: 0.5px;
+        }
+
+        .quality-bar {
+            flex: 1;
+            height: 10px;
+            background: #e8e8e8;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        .quality-bar-fill {
+            height: 100%;
+            background: var(--success-green);
+            border-radius: 5px;
+            transition: width 0.3s ease;
+        }
+
+        .quality-bar-fill.noise {
+            background: var(--accent-teal);
+        }
+
+        .quality-value {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-primary);
+            width: 36px;
+            text-align: right;
+        }
+
+        .stability-dots {
+            flex: 1;
+            display: flex;
+            gap: 3px;
+        }
+
+        .stability-dots .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #e0e0e0;
+        }
+
+        .stability-dots .dot.filled {
+            background: var(--success-green);
+        }
+
+        /* Color Legend */
+        .color-legend {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .legend-label {
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .color-gradient-bar {
+            width: 24px;
+            height: 140px;
+            border-radius: 4px;
+            background: linear-gradient(
+                to bottom,
+                #c62828,
+                #e65100,
+                #f9a825,
+                #ffcc80,
+                #b3e5fc,
+                #81d4fa
+            );
+        }
+
+        /* Direction Indicator */
+        .direction-card {
+            text-align: center;
+        }
+
+        .direction-label {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        .direction-value {
+            font-size: 28px;
+            font-weight: 800;
+            color: var(--text-primary);
+            padding: 12px 16px;
+            background: #f0f0f0;
+            border-radius: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .direction-value.centered {
+            color: var(--success-green);
+            background: #e8f5e9;
+        }
+
+        /* Optimal Indicator */
+        .optimal-indicator {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .optimal-circle {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            border: 3px solid #e0e0e0;
+            background: transparent;
+            transition: all 0.4s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .optimal-circle.active {
+            background: var(--success-green);
+            border-color: var(--success-green);
+            box-shadow: 0 0 20px rgba(76, 175, 80, 0.4);
+        }
+
+        .optimal-circle svg {
+            opacity: 0;
+            transform: scale(0.5);
+            transition: all 0.3s ease;
+        }
+
+        .optimal-circle.active svg {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .optimal-label {
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* Buttons */
+        .button-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: var(--text-secondary);
+        }
+
+        .btn-secondary:hover {
+            background: #e8e8e8;
+        }
+
+        .btn-primary {
+            background: var(--text-primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #222;
+        }
+
+        /* State Toggle */
+        .state-toggle {
+            display: flex;
+            gap: 8px;
+            margin-top: 20px;
+        }
+
+        .state-btn {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .state-btn.active {
+            background: var(--accent-teal);
+            border-color: var(--accent-teal);
+            color: white;
+        }
+
+        .state-btn:hover:not(.active) {
+            border-color: var(--accent-teal);
+            color: var(--accent-teal);
+        }
+
+        /* Connection Status */
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #e0e0e0;
+            transition: background 0.3s ease;
+        }
+
+        .connection-dot.connected {
+            background: var(--success-green);
+        }
+
+        .connection-dot.connecting {
+            background: #ffc107;
+            animation: pulse-recording 1s ease-in-out infinite;
+        }
+
+        .connection-dot.error {
+            background: var(--accent-coral);
+        }
+
+        /* Placement Score Bar */
+        .placement-bar-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 20px;
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-subtle);
+            margin-top: 20px;
+        }
+
+        .placement-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            letter-spacing: 0.5px;
+            min-width: 160px;
+        }
+
+        .placement-bar {
+            flex: 1;
+            height: 16px;
+            background: #e8e8e8;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .placement-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent-coral), #f9a825, var(--success-green));
+            border-radius: 8px;
+            transition: width 0.3s ease;
+        }
+
+        .placement-value {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text-primary);
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .placement-value.good {
+            color: var(--success-green);
+        }
+
+        /* Keyboard Control Card */
+        .keyboard-control-card {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .control-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 11px;
+        }
+
+        .keyboard-indicator {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .key-row {
+            display: flex;
+            gap: 4px;
+        }
+
+        .key {
+            width: 32px;
+            height: 32px;
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            transition: all 0.1s ease;
+        }
+
+        .key.active {
+            background: var(--accent-teal);
+            border-color: var(--accent-teal);
+            color: white;
+            box-shadow: 0 0 12px rgba(74, 155, 155, 0.4);
+            transform: translateY(1px);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Top Bar -->
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <span class="app-title">IonPath</span>
+                <div class="connection-status">
+                    <div class="connection-dot" id="connection-dot"></div>
+                    <span id="connection-text">Disconnected</span>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <div class="signal-bar-container">
+                    <div class="signal-bar">
+                        <div class="signal-bar-fill" id="signal-fill"></div>
+                    </div>
+                    <span class="signal-percentage" id="signal-percent">72%</span>
+                </div>
+                <div class="recording-dot"></div>
+            </div>
+        </div>
+
+        <!-- Main Layout -->
+        <div class="main-layout">
+            <!-- Left Side - Heatmap -->
+            <div class="heatmap-panel">
+                <div class="heatmap-container" id="heatmap-container">
+                    <canvas id="heatmap-canvas" width="520" height="520"></canvas>
+                    <div class="arrow-overlay" id="arrow-overlay"></div>
+                </div>
+            </div>
+
+            <!-- Right Side - Controls -->
+            <div class="controls-panel">
+                <!-- Signal Quality -->
+                <div class="control-card signal-quality-card">
+                    <div class="quality-row">
+                        <span class="quality-label">SIGNAL</span>
+                        <div class="quality-bar">
+                            <div class="quality-bar-fill" id="signal-quality-fill" style="width: 78%"></div>
+                        </div>
+                        <span class="quality-value" id="signal-quality-value">78%</span>
+                    </div>
+                    <div class="quality-row">
+                        <span class="quality-label">NOISE</span>
+                        <div class="quality-bar">
+                            <div class="quality-bar-fill noise" id="noise-fill" style="width: 20%"></div>
+                        </div>
+                        <span class="quality-value" id="noise-value">LOW</span>
+                    </div>
+                    <div class="quality-row">
+                        <span class="quality-label">STABLE</span>
+                        <div class="stability-dots" id="stability-dots">
+                            <span class="dot filled"></span>
+                            <span class="dot filled"></span>
+                            <span class="dot filled"></span>
+                            <span class="dot filled"></span>
+                            <span class="dot filled"></span>
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                            <span class="dot"></span>
+                        </div>
+                        <span class="quality-value" id="stability-value">5/10</span>
+                    </div>
+                </div>
+
+                <!-- Color Legend -->
+                <div class="control-card color-legend">
+                    <span class="legend-label">Strong</span>
+                    <div class="color-gradient-bar"></div>
+                    <span class="legend-label">Weak</span>
+                </div>
+
+                <!-- Direction Indicator -->
+                <div class="control-card direction-card">
+                    <div class="direction-label">Move Array</div>
+                    <div class="direction-value" id="direction-value">→ Right</div>
+                </div>
+
+                <!-- Optimal Indicator -->
+                <div class="control-card optimal-indicator">
+                    <div class="optimal-circle" id="optimal-circle">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                            <path d="M5 12L10 17L19 8" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <span class="optimal-label">Optimal</span>
+                </div>
+
+                <!-- Keyboard Controls -->
+                <div class="control-card keyboard-control-card">
+                    <div class="control-header">
+                        <div class="connection-status">
+                            <div class="connection-dot" id="control-dot"></div>
+                            <span id="control-text">Controls OFF</span>
+                        </div>
+                        <button class="btn btn-secondary btn-small" id="control-btn">Enable</button>
+                    </div>
+                    <div class="keyboard-indicator">
+                        <div class="key-row">
+                            <div class="key" id="key-up">▲</div>
+                        </div>
+                        <div class="key-row">
+                            <div class="key" id="key-left">◀</div>
+                            <div class="key" id="key-down">▼</div>
+                            <div class="key" id="key-right">▶</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Buttons -->
+                <div class="control-card button-group">
+                    <button class="btn btn-secondary" id="snapshot-btn">Snapshot</button>
+                    <button class="btn btn-secondary" id="reset-btn">Reset</button>
+                </div>
+
+                <button class="btn btn-primary" id="done-btn">Done</button>
+            </div>
+        </div>
+
+        <!-- Placement Score Bar -->
+        <div class="placement-bar-container">
+            <div class="placement-label">PLACEMENT CONFIDENCE</div>
+            <div class="placement-bar">
+                <div class="placement-bar-fill" id="placement-fill"></div>
+            </div>
+            <div class="placement-value" id="placement-value">0%</div>
+        </div>
+    </div>
+
+    <script>
+        // ========================================
+        // Configuration
+        // ========================================
+        const BACKEND_URL = 'ws://localhost:8766';
+        const CONTROL_URL = 'ws://localhost:8765/control';
+        const RECONNECT_DELAY = 2000;
+
+        // ========================================
+        // Canvas Setup
+        // ========================================
+        const canvas = document.getElementById('heatmap-canvas');
+        const ctx = canvas.getContext('2d');
+        const gridSize = 32;
+        const cellSize = canvas.width / gridSize;
+
+        // ========================================
+        // State
+        // ========================================
+        let ws = null;
+        let controlWs = null;
+        let isConnected = false;
+        let isControlConnected = false;
+        let isConfirmed = false;  // True only when Done button clicked
+        let signalData = [];      // 32x32 grid of activity values [0-1]
+        let badChannels = [];     // 32x32 grid of booleans
+        let currentGuidance = null;
+        let currentSignalQuality = null;
+        let pressedKeys = new Set();
+
+        // Initialize empty signal data
+        for (let row = 0; row < gridSize; row++) {
+            signalData[row] = new Array(gridSize).fill(0.1);
+            badChannels[row] = new Array(gridSize).fill(false);
+        }
+
+        // ========================================
+        // WebSocket Connection
+        // ========================================
+        function connect() {
+            updateConnectionStatus('connecting');
+
+            try {
+                ws = new WebSocket(BACKEND_URL);
+            } catch (e) {
+                console.error('WebSocket creation failed:', e);
+                updateConnectionStatus('error');
+                setTimeout(connect, RECONNECT_DELAY);
+                return;
+            }
+
+            ws.onopen = () => {
+                console.log('Connected to backend');
+                isConnected = true;
+                updateConnectionStatus('connected');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    processMessage(data);
+                } catch (e) {
+                    console.error('Failed to parse message:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected from backend');
+                isConnected = false;
+                updateConnectionStatus('disconnected');
+                setTimeout(connect, RECONNECT_DELAY);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus('error');
+            };
+        }
+
+        function updateConnectionStatus(status) {
+            const dot = document.getElementById('connection-dot');
+            const text = document.getElementById('connection-text');
+
+            dot.classList.remove('connected', 'connecting', 'error');
+
+            switch (status) {
+                case 'connected':
+                    dot.classList.add('connected');
+                    text.textContent = 'Live';
+                    break;
+                case 'connecting':
+                    dot.classList.add('connecting');
+                    text.textContent = 'Connecting...';
+                    break;
+                case 'error':
+                    dot.classList.add('error');
+                    text.textContent = 'Error';
+                    break;
+                default:
+                    text.textContent = 'Disconnected';
+            }
+        }
+
+        // ========================================
+        // Keyboard Control Connection
+        // ========================================
+        function connectControl() {
+            if (isControlConnected && controlWs) {
+                controlWs.close();
+                return;
+            }
+
+            updateControlStatus('connecting');
+
+            try {
+                controlWs = new WebSocket(CONTROL_URL);
+
+                controlWs.onopen = () => {
+                    console.log('Control WebSocket connected');
+                    updateControlStatus('connected');
+                };
+
+                controlWs.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'control_ack') {
+                            console.log('Control acknowledged');
+                        }
+                    } catch (err) {
+                        // Ignore parse errors
+                    }
+                };
+
+                controlWs.onerror = (error) => {
+                    console.error('Control WebSocket error:', error);
+                    updateControlStatus('disconnected');
+                };
+
+                controlWs.onclose = () => {
+                    console.log('Control WebSocket closed');
+                    updateControlStatus('disconnected');
+                    controlWs = null;
+                };
+            } catch (err) {
+                console.error('Failed to create control WebSocket:', err);
+                updateControlStatus('disconnected');
+            }
+        }
+
+        function updateControlStatus(status) {
+            const dot = document.getElementById('control-dot');
+            const text = document.getElementById('control-text');
+            const btn = document.getElementById('control-btn');
+
+            if (!dot) return;
+
+            dot.classList.remove('connected', 'connecting', 'error');
+
+            switch (status) {
+                case 'connected':
+                    dot.classList.add('connected');
+                    text.textContent = 'Controls ON';
+                    btn.textContent = 'Disable';
+                    btn.disabled = false;
+                    isControlConnected = true;
+                    break;
+                case 'connecting':
+                    dot.classList.add('connecting');
+                    text.textContent = 'Connecting...';
+                    btn.disabled = true;
+                    break;
+                default:
+                    text.textContent = 'Controls OFF';
+                    btn.textContent = 'Enable';
+                    btn.disabled = false;
+                    isControlConnected = false;
+            }
+        }
+
+        function sendKeyEvent(key, pressed) {
+            if (!isControlConnected || !controlWs) return;
+
+            const message = { type: 'key', key: key, pressed: pressed };
+
+            try {
+                controlWs.send(JSON.stringify(message));
+                updateKeyIndicator(key, pressed);
+            } catch (err) {
+                console.error('Error sending key event:', err);
+            }
+        }
+
+        function updateKeyIndicator(key, pressed) {
+            const keyEl = document.getElementById(`key-${key}`);
+            if (keyEl) {
+                keyEl.classList.toggle('active', pressed);
+            }
+        }
+
+        function handleKeyDown(event) {
+            const keyMap = {
+                'ArrowUp': 'up',
+                'ArrowDown': 'down',
+                'ArrowLeft': 'left',
+                'ArrowRight': 'right'
+            };
+
+            const key = keyMap[event.key];
+            if (!key) return;
+
+            event.preventDefault();
+            if (pressedKeys.has(key)) return;
+            pressedKeys.add(key);
+            sendKeyEvent(key, true);
+        }
+
+        function handleKeyUp(event) {
+            const keyMap = {
+                'ArrowUp': 'up',
+                'ArrowDown': 'down',
+                'ArrowLeft': 'left',
+                'ArrowRight': 'right'
+            };
+
+            const key = keyMap[event.key];
+            if (!key) return;
+
+            pressedKeys.delete(key);
+            sendKeyEvent(key, false);
+        }
+
+        // ========================================
+        // Message Processing
+        // ========================================
+        function processMessage(data) {
+            if (data.type !== 'processed') return;
+
+            // Update signal data from current_activity
+            if (data.current_activity) {
+                signalData = data.current_activity;
+            }
+
+            // Update bad channels
+            if (data.bad_channels) {
+                badChannels = data.bad_channels;
+            }
+
+            // Update guidance
+            if (data.guidance) {
+                currentGuidance = data.guidance;
+            }
+
+            // Update signal quality
+            if (data.signal_quality) {
+                currentSignalQuality = data.signal_quality;
+            }
+
+            // Re-render everything
+            renderHeatmap();
+            renderArrow();
+            updateDirectionIndicator();
+            updateOptimalIndicator();
+            updateSignalQualityDisplay();
+            updateTopBarSignal();
+        }
+
+        // ========================================
+        // Color Interpolation
+        // ========================================
+        function getHeatmapColor(value) {
+            // Light blue (weak) -> orange -> deep red (strong)
+            const colors = [
+                { pos: 0, r: 129, g: 212, b: 250 },    // Light blue
+                { pos: 0.3, r: 179, g: 229, b: 252 },  // Lighter blue
+                { pos: 0.5, r: 255, g: 204, b: 128 },  // Light orange
+                { pos: 0.7, r: 249, g: 168, b: 37 },   // Orange
+                { pos: 0.85, r: 230, g: 81, b: 0 },    // Deep orange
+                { pos: 1, r: 198, g: 40, b: 40 }       // Deep red
+            ];
+
+            let lower = colors[0];
+            let upper = colors[colors.length - 1];
+
+            for (let i = 0; i < colors.length - 1; i++) {
+                if (value >= colors[i].pos && value <= colors[i + 1].pos) {
+                    lower = colors[i];
+                    upper = colors[i + 1];
+                    break;
+                }
+            }
+
+            const range = upper.pos - lower.pos;
+            const t = range === 0 ? 0 : (value - lower.pos) / range;
+
+            const r = Math.round(lower.r + (upper.r - lower.r) * t);
+            const g = Math.round(lower.g + (upper.g - lower.g) * t);
+            const b = Math.round(lower.b + (upper.b - lower.b) * t);
+
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        // ========================================
+        // Rendering
+        // ========================================
+        function renderHeatmap() {
+            for (let row = 0; row < gridSize; row++) {
+                for (let col = 0; col < gridSize; col++) {
+                    const x = col * cellSize;
+                    const y = row * cellSize;
+                    const value = signalData[row]?.[col] ?? 0;
+
+                    // Check if this is a bad channel
+                    const isBad = badChannels[row]?.[col] ?? false;
+
+                    if (isBad) {
+                        // Mark bad channels with dark gray
+                        ctx.fillStyle = '#444';
+                    } else {
+                        ctx.fillStyle = getHeatmapColor(value);
+                    }
+                    ctx.fillRect(x, y, cellSize - 0.5, cellSize - 0.5);
+                }
+            }
+
+            // Subtle grid lines
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= gridSize; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * cellSize, 0);
+                ctx.lineTo(i * cellSize, canvas.height);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, i * cellSize);
+                ctx.lineTo(canvas.width, i * cellSize);
+                ctx.stroke();
+            }
+        }
+
+        // Convert backend arrow direction to angle
+        function arrowToAngle(arrow) {
+            const angles = {
+                'right': 0,
+                'up-right': 45,
+                'up': 90,
+                'up-left': 135,
+                'left': 180,
+                'down-left': 225,
+                'down': 270,
+                'down-right': 315,
+                'center': 0
+            };
+            return angles[arrow] ?? 0;
+        }
+
+        // Render direction arrow on the heatmap
+        function renderArrow() {
+            const arrowOverlay = document.getElementById('arrow-overlay');
+            const size = 520;
+            const center = size / 2;
+
+            // Create SVG
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', size);
+            svg.setAttribute('height', size);
+            svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+
+            // Center circle
+            const circleRadius = 90;
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', center);
+            circle.setAttribute('cy', center);
+            circle.setAttribute('r', circleRadius);
+            circle.setAttribute('fill', 'rgba(255, 255, 255, 0.92)');
+            circle.setAttribute('stroke', 'rgba(0, 0, 0, 0.15)');
+            circle.setAttribute('stroke-width', '3');
+            svg.appendChild(circle);
+
+            // Show checkmark ONLY if user clicked Done (isConfirmed)
+            if (isConfirmed) {
+                const check = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                check.setAttribute('d', `M${center - 35} ${center} L${center - 10} ${center + 25} L${center + 40} ${center - 30}`);
+                check.setAttribute('stroke', '#4CAF50');
+                check.setAttribute('stroke-width', '12');
+                check.setAttribute('stroke-linecap', 'round');
+                check.setAttribute('stroke-linejoin', 'round');
+                check.setAttribute('fill', 'none');
+                svg.appendChild(check);
+            } else if (currentGuidance && !currentGuidance.is_centered) {
+                // Show arrow pointing in movement direction
+                const angle = arrowToAngle(currentGuidance.arrow);
+                const distance = currentGuidance.distance ?? 5;
+                const arrowScale = Math.min(1, Math.max(0.5, distance / 15));
+                const arrowLen = 55 * arrowScale;
+                const shaftWidth = 16;
+                const headWidth = 44;
+                const headLength = 30;
+
+                const arrowGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                // Convert angle: backend uses down=positive-y, svg uses up=negative-y
+                // right=0°, up=90°, left=180°, down=270°
+                arrowGroup.setAttribute('transform', `translate(${center}, ${center}) rotate(${-angle})`);
+
+                const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const startX = -arrowLen;
+                const endX = arrowLen;
+                const shaftEndX = endX - headLength;
+
+                arrow.setAttribute('d', `
+                    M ${startX} ${-shaftWidth/2}
+                    L ${shaftEndX} ${-shaftWidth/2}
+                    L ${shaftEndX} ${-headWidth/2}
+                    L ${endX} 0
+                    L ${shaftEndX} ${headWidth/2}
+                    L ${shaftEndX} ${shaftWidth/2}
+                    L ${startX} ${shaftWidth/2}
+                    Z
+                `);
+                arrow.setAttribute('fill', '#333');
+
+                arrowGroup.appendChild(arrow);
+                svg.appendChild(arrowGroup);
+            } else if (currentGuidance && currentGuidance.is_centered) {
+                // Centered but not confirmed - show a small dot or nothing
+                const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                dot.setAttribute('cx', center);
+                dot.setAttribute('cy', center);
+                dot.setAttribute('r', 15);
+                dot.setAttribute('fill', '#4CAF50');
+                svg.appendChild(dot);
+            }
+
+            arrowOverlay.innerHTML = '';
+            arrowOverlay.appendChild(svg);
+
+            arrowOverlay.style.left = '0';
+            arrowOverlay.style.top = '0';
+            arrowOverlay.style.width = `${size}px`;
+            arrowOverlay.style.height = `${size}px`;
+        }
+
+        // Update direction indicator text
+        function updateDirectionIndicator() {
+            const dirValue = document.getElementById('direction-value');
+
+            if (isConfirmed) {
+                dirValue.textContent = '✓ Confirmed';
+                dirValue.classList.add('centered');
+            } else if (currentGuidance) {
+                if (currentGuidance.is_centered) {
+                    dirValue.textContent = '● Centered';
+                    dirValue.classList.add('centered');
+                } else {
+                    // Map direction text with arrows
+                    const directionMap = {
+                        'MOVE UP': '↑ Up',
+                        'MOVE DOWN': '↓ Down',
+                        'MOVE LEFT': '← Left',
+                        'MOVE RIGHT': '→ Right',
+                        'MOVE UP-LEFT': '↖ Up-Left',
+                        'MOVE UP-RIGHT': '↗ Up-Right',
+                        'MOVE DOWN-LEFT': '↙ Down-Left',
+                        'MOVE DOWN-RIGHT': '↘ Down-Right',
+                        'CENTERED': '● Centered'
+                    };
+                    dirValue.textContent = directionMap[currentGuidance.direction] || currentGuidance.direction;
+                    dirValue.classList.remove('centered');
+                }
+            } else {
+                dirValue.textContent = '— Waiting';
+                dirValue.classList.remove('centered');
+            }
+        }
+
+        // Update optimal indicator (checkmark circle on right side)
+        function updateOptimalIndicator() {
+            const circle = document.getElementById('optimal-circle');
+
+            if (isConfirmed) {
+                circle.classList.add('active');
+            } else {
+                circle.classList.remove('active');
+            }
+        }
+
+        // Update signal quality display
+        function updateSignalQualityDisplay() {
+            if (!currentSignalQuality) return;
+
+            // Signal strength (0-1 -> percentage)
+            const signalPercent = Math.round((currentSignalQuality.signal_strength ?? 0.5) * 100);
+            document.getElementById('signal-quality-fill').style.width = `${signalPercent}%`;
+            document.getElementById('signal-quality-value').textContent = `${signalPercent}%`;
+
+            // Noise level (0-1, lower is better)
+            const noiseRatio = currentSignalQuality.noise_ratio ?? 0.3;
+            const noisePercent = Math.round(noiseRatio * 100);
+            document.getElementById('noise-fill').style.width = `${noisePercent}%`;
+            let noiseLabel = 'LOW';
+            if (noiseRatio > 0.6) noiseLabel = 'HIGH';
+            else if (noiseRatio > 0.3) noiseLabel = 'MED';
+            document.getElementById('noise-value').textContent = noiseLabel;
+
+            // Stability (0-1 -> 10 dots)
+            const stability = Math.round((currentSignalQuality.stability ?? 0.5) * 10);
+            const dots = document.querySelectorAll('#stability-dots .dot');
+            dots.forEach((dot, i) => {
+                dot.classList.toggle('filled', i < stability);
+            });
+            document.getElementById('stability-value').textContent = `${stability}/10`;
+
+            // Placement score (0-1 -> percentage)
+            // This is high only when: stable + centered + strong hotspot
+            const placementScore = currentSignalQuality.placement_score ?? 0;
+            const placementPercent = Math.round(placementScore * 100);
+            document.getElementById('placement-fill').style.width = `${placementPercent}%`;
+            const placementValueEl = document.getElementById('placement-value');
+            placementValueEl.textContent = `${placementPercent}%`;
+            placementValueEl.classList.toggle('good', placementPercent >= 50);
+        }
+
+        // Update top bar signal display
+        function updateTopBarSignal() {
+            if (!currentSignalQuality) return;
+
+            const signalPercent = Math.round((currentSignalQuality.signal_strength ?? 0.5) * 100);
+            document.getElementById('signal-fill').style.width = `${signalPercent}%`;
+            document.getElementById('signal-percent').textContent = `${signalPercent}%`;
+        }
+
+        // ========================================
+        // Event Handlers
+        // ========================================
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            isConfirmed = false;
+            renderArrow();
+            updateDirectionIndicator();
+            updateOptimalIndicator();
+        });
+
+        document.getElementById('snapshot-btn').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = 'bci-snapshot.png';
+            link.href = canvas.toDataURL();
+            link.click();
+        });
+
+        document.getElementById('done-btn').addEventListener('click', () => {
+            isConfirmed = true;
+            renderArrow();
+            updateDirectionIndicator();
+            updateOptimalIndicator();
+            console.log('Placement confirmed!');
+        });
+
+        // ========================================
+        // Initialization
+        // ========================================
+        renderHeatmap();
+        renderArrow();
+        connect();
+
+        // Control button handler
+        document.getElementById('control-btn').addEventListener('click', connectControl);
+
+        // Keyboard event listeners
+        document.addEventListener('keydown', handleKeyDown);
+        document.addEventListener('keyup', handleKeyUp);
+
+        // Clear pressed keys when window loses focus
+        window.addEventListener('blur', () => {
+            for (const key of pressedKeys) {
+                sendKeyEvent(key, false);
+            }
+            pressedKeys.clear();
+        });
+    </script>
+</body>
+</html>
