@@ -206,4 +206,3 @@ if __name__ == "__main__":
     else:
         print("Downloading all Track 2 datasets...")
         download_track2_data()
-
