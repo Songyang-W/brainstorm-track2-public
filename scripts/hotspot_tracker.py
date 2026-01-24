@@ -824,12 +824,14 @@ def extract_peak_observations(
     smooth_sigma=1.0,
     suppress_radius=6,
     com_radius=2,
+    min_abs=0.0,
 ):
     """
     Robustly extract the top-N peak locations from a 32x32 activity grid.
 
     This avoids connected-component merging and produces stable observations for
     tracking even when only 1-2 spots are lit in a frame.
+    min_abs filters out weak peaks after normalization.
     """
     g = ndimage.gaussian_filter(grid, sigma=smooth_sigma)
     work = g.copy()
@@ -838,7 +840,7 @@ def extract_peak_observations(
     for _ in range(n_peaks):
         idx = np.argmax(work)
         peak_val = float(work.flat[idx])
-        if not np.isfinite(peak_val) or peak_val <= 0:
+        if not np.isfinite(peak_val) or peak_val <= 0 or peak_val < float(min_abs):
             break
 
         r0, c0 = np.unravel_index(idx, work.shape)
@@ -992,6 +994,130 @@ class PersistentSpotClusterTracker:
             r, c = float(tr["pos"][0]), float(tr["pos"][1])
             out.append((r, c, float(tr["strength"]), int(tr["age"])))
         return out
+
+
+class InterpretableClusterTracker:
+    """
+    Interpretable tracker for noisy data using peak observations + persistent memory.
+
+    Returns a stable center, a confidence score, and a long-memory map of anchors
+    without assuming four tuned regions.
+    """
+
+    def __init__(
+        self,
+        grid_size: int = 32,
+        peak_n: int = 6,
+        peak_smooth_sigma: float = 1.0,
+        peak_suppress_radius: int = 7,
+        peak_com_radius: int = 2,
+        peak_min_abs: float = 0.15,
+        max_tracks: int = 10,
+        ema_alpha: float = 0.4,
+        max_match_dist: float = 7.5,
+        strength_gain: float = 0.3,
+        strength_decay: float = 0.98,
+        max_age: int = 240,
+        memory_half_life_s: float = 45.0,
+        memory_sigma: float = 1.0,
+        age_tau_updates: float = 120.0,
+        conf_strength_weight: float = 0.7,
+        conf_count_weight: float = 0.3,
+    ):
+        self.grid_size = int(grid_size)
+        self.peak_n = int(peak_n)
+        self.peak_smooth_sigma = float(peak_smooth_sigma)
+        self.peak_suppress_radius = int(peak_suppress_radius)
+        self.peak_com_radius = int(peak_com_radius)
+        self.peak_min_abs = float(peak_min_abs)
+        self.tracker = PersistentSpotClusterTracker(
+            max_tracks=max_tracks,
+            ema_alpha=ema_alpha,
+            max_match_dist=max_match_dist,
+            strength_gain=strength_gain,
+            strength_decay=strength_decay,
+            max_age=max_age,
+        )
+        self.memory_half_life_s = float(memory_half_life_s)
+        self.memory_sigma = float(memory_sigma)
+        self.age_tau_updates = float(age_tau_updates)
+        self.conf_strength_weight = float(conf_strength_weight)
+        self.conf_count_weight = float(conf_count_weight)
+        self.memory_map: np.ndarray | None = None
+
+    def reset(self) -> None:
+        self.tracker.reset()
+        self.memory_map = None
+
+    def _age_weight(self, age: int) -> float:
+        return float(np.exp(-float(age) / max(1.0, self.age_tau_updates)))
+
+    def _confidence(self, track_states: list[tuple[float, float, float, int]]) -> float:
+        if not track_states:
+            return 0.0
+        weighted = [float(s) * self._age_weight(age) for (_r, _c, s, age) in track_states]
+        weighted.sort(reverse=True)
+        strength_conf = float(np.mean(weighted[:2]))
+        count_conf = min(1.0, len(weighted) / 2.0)
+        return float(np.clip(
+            self.conf_strength_weight * strength_conf + self.conf_count_weight * count_conf,
+            0.0,
+            1.0,
+        ))
+
+    def _update_memory(self, track_states: list[tuple[float, float, float, int]], dt_s: float) -> np.ndarray:
+        if self.memory_map is None:
+            self.memory_map = np.zeros((self.grid_size, self.grid_size), dtype=float)
+        decay = 0.5 ** (dt_s / max(1e-3, self.memory_half_life_s))
+        self.memory_map *= decay
+
+        if not track_states:
+            return self.memory_map
+
+        upd = np.zeros_like(self.memory_map)
+        for r, c, s, age in track_states:
+            rr = int(round(float(r)))
+            cc = int(round(float(c)))
+            if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
+                val = float(s) * self._age_weight(int(age))
+                if val > upd[rr, cc]:
+                    upd[rr, cc] = val
+
+        if float(upd.max()) > 0:
+            if self.memory_sigma > 0:
+                upd = ndimage.gaussian_filter(upd, sigma=self.memory_sigma)
+            mx = float(upd.max())
+            if mx > 0:
+                upd = upd / mx
+            self.memory_map = np.maximum(self.memory_map, upd)
+        return self.memory_map
+
+    def update(
+        self, grid: np.ndarray, dt_s: float = 0.05
+    ) -> tuple[
+        float | None,
+        float | None,
+        float,
+        np.ndarray | None,
+        list[tuple[float, float, float]],
+        list[tuple[float, float, float, int]],
+    ]:
+        g = np.maximum(grid.astype(float), 0.0)
+        scale = float(np.percentile(g, 99.5)) + 1e-6
+        g_norm = np.clip(g / scale, 0.0, 1.0)
+        observations = extract_peak_observations(
+            g_norm,
+            n_peaks=self.peak_n,
+            smooth_sigma=self.peak_smooth_sigma,
+            suppress_radius=self.peak_suppress_radius,
+            com_radius=self.peak_com_radius,
+            min_abs=self.peak_min_abs,
+        )
+        cr, cc, _tracks = self.tracker.update(observations)
+        track_states = self.tracker.track_states()
+        conf = self._confidence(track_states)
+        memory = self._update_memory(track_states, dt_s)
+        return cr, cc, conf, memory, observations, track_states
 
 
 def track_persistent_cluster_center_over_time(

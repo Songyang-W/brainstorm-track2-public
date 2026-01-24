@@ -270,6 +270,8 @@ function updateUI(frame) {
     dom.debugCenter.textContent = `${(frame.center_row ?? 0).toFixed(1)}, ${(frame.center_col ?? 0).toFixed(1)}`;
     dom.debugConfidence.textContent = `${Math.round(conf * 100)}%`;
     dom.debugDistance.textContent = dist.toFixed(2);
+    dom.debugVx.textContent = Number.isFinite(frame.cursor_vx) ? frame.cursor_vx.toFixed(1) : "--";
+    dom.debugVy.textContent = Number.isFinite(frame.cursor_vy) ? frame.cursor_vy.toFixed(1) : "--";
 
     const regions = frame.regions || {};
     const regionCount = Object.keys(regions).length;
@@ -405,6 +407,8 @@ function init() {
   dom.debugCenter = $("debug-center");
   dom.debugConfidence = $("debug-confidence");
   dom.debugDistance = $("debug-distance");
+  dom.debugVx = $("debug-vx");
+  dom.debugVy = $("debug-vy");
   dom.debugRegions = $("debug-regions");
 
   // Setup canvases

@@ -476,7 +476,7 @@ body {
 
 .debug-metrics {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
 
@@ -520,5 +520,9 @@ body {
     right: 10px;
     left: 10px;
     width: auto;
+  }
+
+  .debug-metrics {
+    grid-template-columns: repeat(2, 1fr);
   }
 }

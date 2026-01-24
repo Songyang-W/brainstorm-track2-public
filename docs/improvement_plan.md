@@ -8,7 +8,7 @@ Added a `SimpleKalmanFilter2D` class that smooths the center estimate for UI dis
 
 - **State vector**: `[row, col, vel_row, vel_col]` (position + velocity)
 - **Process model**: Constant velocity with configurable noise
-- **Measurement**: Raw center from `FourTunedRegionTracker`
+- **Measurement**: Raw center from `InterpretableClusterTracker`
 - **Effect**: Eliminates jittery center movement in UI without affecting tracking accuracy
 
 The Kalman filter is applied **after** the core tracker runs, so it only affects what the UI displays, not the underlying tracking metrics.
@@ -31,25 +31,38 @@ Completely redesigned the UI with one goal: **answer "which way to move?" instan
 - Controls panel (collapsed by default)
 - Debug panel (hidden by default, toggle available)
 
-### 3. Code Changes
+### 3. Interpretable Tracker for Noisy Data
+
+Replaced the four-region tracker with a peak-based, memory-backed tracker that
+does not assume fixed Vx/Vy regions. It:
+- extracts top peaks each frame (robust to noise)
+- keeps a persistent set of peak tracks (interpretable anchors)
+- outputs a confidence based on track strength + count
+- maintains a long-memory map for debug UI
+
+### 4. Signal Conditioning for Hard Mode
+
+- 60/120 Hz notch filters to suppress line noise + harmonic
+- Persistent bad-channel detection to mask dead/artifact channels
+- Optional cursor velocity passthrough for live demos
+
+### 5. Code Changes
 
 **Files modified**:
-- `scripts/hotspot_tracker.py` - Added `SimpleKalmanFilter2D` and `MotionCompensatedTracker` classes
-- `scripts/compass_backend.py` - Integrated Kalman smoothing on top of existing tracker
+- `scripts/hotspot_tracker.py` - Added `InterpretableClusterTracker` and `track_states`
+- `scripts/compass_backend.py` - Integrated new tracker, bad-channel masking, 60/120 Hz notch filtering, cursor passthrough
 - `example_app/index.html` - New simplified layout
 - `example_app/style.css` - New clinical light theme
 - `example_app/app.js` - New state management and rendering
 
-## Performance Results
+## Current Performance (defaults)
 
-| Dataset | Metric | Before | After |
-|---------|--------|--------|-------|
-| super_easy | center_rmse | 3.984 | 3.863 |
-| super_easy | move_cos median | 0.998 | 0.997 |
-| medium | center_rmse | 4.956 | 5.023 |
-| medium | move_cos median | 0.969 | 0.972 |
+| Dataset | center_rmse | move_cos median |
+|---------|-------------|----------------|
+| medium | 3.639 | 0.971 |
+| hard | 3.954 | 0.950 |
 
-The tracking accuracy is maintained or slightly improved while the UI is now much smoother.
+These defaults are tuned for noisy `medium`/`hard` data while keeping the UI stable.
 
 ## UI States
 

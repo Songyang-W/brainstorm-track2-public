@@ -64,8 +64,8 @@ def main(
     dataset: str = typer.Argument("super_easy", help="Dataset folder under data/"),
     seconds: float = typer.Option(30.0, help="Seconds to evaluate from start"),
     batch_size: int = typer.Option(10, help="Samples per batch (matches stream messages)"),
-    ema_tau_s: float = typer.Option(0.20, help="EMA time constant (seconds)"),
-    spatial_sigma: float = typer.Option(1.0, help="Spatial smoothing sigma"),
+    ema_tau_s: float = typer.Option(0.35, help="EMA time constant (seconds)"),
+    spatial_sigma: float = typer.Option(1.2, help="Spatial smoothing sigma"),
 ) -> None:
     data_path = f"data/{dataset}"
     df = pd.read_parquet(f"{data_path}/track2_data.parquet")
