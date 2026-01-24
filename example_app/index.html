@@ -3,16 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Neural Data Viewer</title>
+    <title>BCI Array Placement</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Neural Activity</h1>
+            <h1>BCI ARRAY PLACEMENT</h1>
             <div class="status-bar">
                 <span class="status-indicator" id="status-indicator"></span>
                 <span id="status-text">Disconnected</span>
@@ -21,19 +21,100 @@
                 <span class="separator">|</span>
                 <span id="fps-counter">0 FPS</span>
                 <span class="separator">|</span>
-                <span id="channel-count">0 channels</span>
+                <span id="signal-quality">Signal: --</span>
+                <span class="separator gt-info">|</span>
+                <span id="phase-display" class="gt-info">Phase: --</span>
+                <span class="separator gt-info">|</span>
+                <span id="velocity-display" class="gt-info">Vel: (0, 0)</span>
             </div>
         </header>
 
         <main>
-            <div class="canvas-container">
-                <canvas id="neural-canvas"></canvas>
-                <div class="colorbar">
-                    <div class="colorbar-gradient"></div>
-                    <div class="colorbar-labels">
-                        <span id="colorbar-max">+0.02</span>
-                        <span id="colorbar-zero">0.0</span>
-                        <span id="colorbar-min">-0.02</span>
+            <div class="visualization-container">
+                <!-- Activity Heatmap -->
+                <div class="heatmap-section">
+                    <div class="section-label">ARRAY VIEW (32×32)</div>
+                    <div class="canvas-wrapper">
+                        <canvas id="neural-canvas"></canvas>
+                        <div class="crosshair-overlay" id="crosshair-overlay">
+                            <div class="crosshair-h"></div>
+                            <div class="crosshair-v"></div>
+                            <div class="center-marker" id="center-marker"></div>
+                        </div>
+                        <div class="centroid-marker" id="centroid-marker"></div>
+                    </div>
+                    <div class="colorbar">
+                        <div class="colorbar-gradient"></div>
+                        <div class="colorbar-labels">
+                            <span>LOW</span>
+                            <span>HIGH</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Global Brain Map -->
+                <div class="global-map-section">
+                    <div class="section-label">GLOBAL BRAIN MAP</div>
+                    <div class="global-canvas-wrapper">
+                        <canvas id="global-canvas"></canvas>
+                        <div class="array-position-indicator" id="array-indicator"></div>
+                    </div>
+                    <div class="exploration-bar-container">
+                        <span class="exploration-label">Explored:</span>
+                        <div class="exploration-bar-outer">
+                            <div class="exploration-bar-inner" id="exploration-bar"></div>
+                        </div>
+                        <span class="exploration-value" id="exploration-value">0%</span>
+                    </div>
+                    <div class="exploration-suggestion" id="exploration-suggestion">
+                        <span class="suggestion-label">Unexplored:</span>
+                        <span class="suggestion-value" id="suggestion-value">--</span>
+                    </div>
+                </div>
+
+                <!-- Guidance Panel -->
+                <div class="guidance-section">
+                    <div class="section-label">GUIDANCE</div>
+
+                    <div class="guidance-main">
+                        <div class="arrow-container" id="arrow-container">
+                            <svg id="guidance-arrow" viewBox="0 0 100 100" class="guidance-arrow">
+                                <!-- Arrow will be drawn dynamically -->
+                            </svg>
+                        </div>
+                        <div class="direction-text" id="direction-text">SEARCHING...</div>
+                    </div>
+
+                    <div class="guidance-details">
+                        <div class="detail-row">
+                            <span class="detail-label">Distance</span>
+                            <span class="detail-value" id="distance-value">--</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Confidence</span>
+                            <div class="confidence-bar-container">
+                                <div class="confidence-bar" id="confidence-bar"></div>
+                            </div>
+                            <span class="detail-value" id="confidence-value">0%</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Clusters</span>
+                            <span class="detail-value" id="cluster-count">0</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Hotspots</span>
+                            <span class="detail-value" id="global-hotspot-count">0</span>
+                        </div>
+                    </div>
+
+                    <div class="array-position-display">
+                        <span class="position-label">Array Position:</span>
+                        <span class="position-value" id="array-position-value">(0, 0)</span>
+                    </div>
+
+                    <div class="centered-indicator" id="centered-indicator">
+                        <div class="centered-icon">✓</div>
+                        <div class="centered-text">CENTERED</div>
                     </div>
                 </div>
             </div>
@@ -41,9 +122,39 @@
 
         <footer>
             <div class="controls">
-                <label for="server-url">Server URL:</label>
-                <input type="text" id="server-url" value="ws://localhost:8765">
+                <div class="control-group">
+                    <label for="server-url">Backend URL:</label>
+                    <input type="text" id="server-url" value="ws://localhost:8766">
+                </div>
                 <button id="connect-btn">Connect</button>
+                <button id="reset-btn" class="secondary">Reset</button>
+                <button id="gt-toggle-btn" class="secondary active">Hide GT</button>
+            </div>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color centroid"></div>
+                    <span>Detected</span>
+                </div>
+                <div class="legend-item gt-legend">
+                    <div class="legend-color gt-star"></div>
+                    <span>GT Center</span>
+                </div>
+                <div class="legend-item gt-legend">
+                    <div class="legend-color gt-vx-pos"></div>
+                    <span>Vx+</span>
+                </div>
+                <div class="legend-item gt-legend">
+                    <div class="legend-color gt-vx-neg"></div>
+                    <span>Vx-</span>
+                </div>
+                <div class="legend-item gt-legend">
+                    <div class="legend-color gt-vy-pos"></div>
+                    <span>Vy+</span>
+                </div>
+                <div class="legend-item gt-legend">
+                    <div class="legend-color gt-vy-neg"></div>
+                    <span>Vy-</span>
+                </div>
             </div>
         </footer>
     </div>
