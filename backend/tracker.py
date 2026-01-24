@@ -8,6 +8,7 @@ Implements:
 - Global brain mapping with motion estimation
 """
 
+from collections import Counter
 from typing import Any
 
 import numpy as np
@@ -329,13 +330,19 @@ class HotspotDetector:
 class GuidanceGenerator:
     """Generate surgical guidance based on hotspot location."""
 
-    def __init__(self, grid_size: int = 32, center_tolerance: float = 2.0):
+    def __init__(
+        self,
+        grid_size: int = 32,
+        center_tolerance: float = 2.0,
+        direction_buffer_size: int = 10,  # Frames before direction can change
+    ):
         """
         Initialize guidance generator.
 
         Args:
             grid_size: Size of the grid
             center_tolerance: How close to center counts as "centered"
+            direction_buffer_size: Number of consistent frames before direction changes
         """
         self.grid_size = grid_size
         self.grid_center = (
@@ -343,11 +350,17 @@ class GuidanceGenerator:
             grid_size / 2 - 0.5,
         )  # 0-indexed center
         self.center_tolerance = center_tolerance
+        self.direction_buffer_size = direction_buffer_size
 
         # Smoothed guidance to prevent jitter
         self.smoothed_offset_row = 0.0
         self.smoothed_offset_col = 0.0
         self.guidance_alpha = 0.2
+
+        # Direction buffering - only change if consistent
+        self.direction_history: list[str] = []
+        self.current_stable_direction = "SEARCHING..."
+        self.current_stable_arrow: str | None = None
 
     def generate(
         self, centroid: tuple[float, float] | None, confidence: float
@@ -369,11 +382,16 @@ class GuidanceGenerator:
                 - confidence: Confidence level
         """
         if centroid is None:
+            # Reset stable direction when searching
+            self.current_stable_direction = "SEARCHING..."
+            self.current_stable_arrow = None
+            self.direction_history = []
             return {
                 "direction": "SEARCHING...",
                 "arrow": None,
                 "offset": (0, 0),
                 "distance": 0,
+                "magnitude": 0,
                 "is_centered": False,
                 "confidence": 0,
             }
@@ -403,11 +421,15 @@ class GuidanceGenerator:
         is_centered = distance < self.center_tolerance
 
         if is_centered:
+            self.current_stable_direction = "CENTERED"
+            self.current_stable_arrow = "center"
+            self.direction_history = []
             return {
                 "direction": "CENTERED",
                 "arrow": "center",
                 "offset": (float(offset_row), float(offset_col)),
                 "distance": float(distance),
+                "magnitude": 0,  # No movement needed
                 "is_centered": True,
                 "confidence": float(confidence),
             }
@@ -416,30 +438,75 @@ class GuidanceGenerator:
         directions = []
         arrow_parts = []
 
+        # Scale threshold by distance - closer to center = need bigger offset to trigger
+        # This creates a larger "dead zone" near center for stability
+        distance_scale = max(0.5, min(1.5, distance / 5.0))  # 0.5x to 1.5x
+        scaled_tolerance = self.center_tolerance / distance_scale
+
         # Vertical component (row increases downward in grid)
-        if offset_row < -self.center_tolerance / 2:
+        if offset_row < -scaled_tolerance / 2:
             directions.append("UP")
             arrow_parts.append("up")
-        elif offset_row > self.center_tolerance / 2:
+        elif offset_row > scaled_tolerance / 2:
             directions.append("DOWN")
             arrow_parts.append("down")
 
         # Horizontal component (col increases rightward)
-        if offset_col < -self.center_tolerance / 2:
+        if offset_col < -scaled_tolerance / 2:
             directions.append("LEFT")
             arrow_parts.append("left")
-        elif offset_col > self.center_tolerance / 2:
+        elif offset_col > scaled_tolerance / 2:
             directions.append("RIGHT")
             arrow_parts.append("right")
 
-        direction_text = "MOVE " + "-".join(directions) if directions else "HOLD"
-        arrow = "-".join(arrow_parts) if arrow_parts else None
+        raw_direction = "MOVE " + "-".join(directions) if directions else "HOLD"
+        raw_arrow = "-".join(arrow_parts) if arrow_parts else None
+
+        # Calculate magnitude (0-1) based on distance - closer = smaller
+        max_distance = self.grid_size / 2
+        magnitude = min(1.0, distance / max_distance)
+
+        # If magnitude is too low, just wait - don't give potentially wrong guidance
+        if magnitude < 0.15:
+            return {
+                "direction": "HOLD",
+                "arrow": None,
+                "offset": (float(offset_row), float(offset_col)),
+                "distance": float(distance),
+                "magnitude": float(magnitude),
+                "is_centered": False,
+                "confidence": float(confidence),
+            }
+
+        # Buffer direction changes - only update if consistent for N frames
+        self.direction_history.append(raw_direction)
+        if len(self.direction_history) > self.direction_buffer_size:
+            self.direction_history.pop(0)
+
+        # Check if recent history is consistent
+        if len(self.direction_history) >= self.direction_buffer_size:
+            # Count most common direction in buffer
+            counts = Counter(self.direction_history)
+            most_common, count = counts.most_common(1)[0]
+            # Only change if majority agrees (>60%)
+            if count >= self.direction_buffer_size * 0.6:
+                self.current_stable_direction = most_common
+                self.current_stable_arrow = (
+                    raw_arrow
+                    if most_common == raw_direction
+                    else self.current_stable_arrow
+                )
+            else:
+                # Too conflicted - hold and wait for clearer signal
+                self.current_stable_direction = "HOLD"
+                self.current_stable_arrow = None
 
         return {
-            "direction": direction_text,
-            "arrow": arrow,
+            "direction": self.current_stable_direction,
+            "arrow": self.current_stable_arrow,
             "offset": (float(offset_row), float(offset_col)),
             "distance": float(distance),
+            "magnitude": float(magnitude),
             "is_centered": False,
             "confidence": float(confidence),
         }
@@ -459,6 +526,7 @@ class BCITracker:
         center_tolerance: float = 2.0,
         blend_current_weight: float = 0.6,
         blend_historical_weight: float = 0.4,
+        window_frames: int = 30,  # Rolling window size (~0.6s at 50fps)
     ):
         """
         Initialize complete tracker.
@@ -473,8 +541,13 @@ class BCITracker:
             center_tolerance: Distance for "centered" state
             blend_current_weight: Weight for current belief_map in blending
             blend_historical_weight: Weight for persistent_evidence in blending
+            window_frames: Number of recent frames to accumulate for hotspot detection
         """
         self.grid_size = grid_size
+        self.window_frames = window_frames
+
+        # Rolling window buffer for recent frames
+        self.frame_buffer: list[np.ndarray] = []
 
         self.evidence_tracker = EvidenceTracker(
             grid_size=grid_size,
@@ -523,12 +596,27 @@ class BCITracker:
         # Blend current belief_map with persistent_evidence for robust tracking
         blended_map = self.blended_tracker.blend(belief_map, persistent_evidence)
 
-        # Get current activity grid for direct detection
+        # Get current activity grid
         current_activity = normalized_power.reshape(self.grid_size, self.grid_size)
 
-        # Detect hotspots using current activity (what's actually displayed)
-        # This ensures the centroid marker matches visible activity
-        hotspot_result = self.hotspot_detector.detect(current_activity, bad_channels)
+        # Add to rolling window buffer
+        self.frame_buffer.append(current_activity.copy())
+        if len(self.frame_buffer) > self.window_frames:
+            self.frame_buffer.pop(0)
+
+        # Accumulate recent frames with exponential weighting
+        # Recent frames weighted higher, older frames still contribute but less
+        if len(self.frame_buffer) > 0:
+            n = len(self.frame_buffer)
+            # Exponential weights: most recent = 1.0, decay factor ~0.9 per frame
+            weights = np.array([0.9 ** (n - 1 - i) for i in range(n)])
+            weights /= weights.sum()  # Normalize
+            accumulated = np.tensordot(weights, self.frame_buffer, axes=(0, 0))
+        else:
+            accumulated = current_activity
+
+        # Detect hotspots on accumulated recent activity
+        hotspot_result = self.hotspot_detector.detect(accumulated, bad_channels)
 
         # Calculate confidence based on hotspot strength
         if (
@@ -562,6 +650,7 @@ class BCITracker:
 
     def reset(self):
         """Reset tracker state."""
+        self.frame_buffer = []
         self.evidence_tracker.reset()
         self.guidance_generator.smoothed_offset_row = 0.0
         self.guidance_generator.smoothed_offset_col = 0.0
@@ -746,6 +835,31 @@ class HotspotTracker:
     def get_detected_hotspots(self) -> list[dict]:
         """Get currently tracked hotspots."""
         return self.hotspot_positions.copy() if self.hotspot_positions else []
+
+    def get_stability_score(self) -> float:
+        """
+        Calculate stability score based on centroid movement history.
+
+        Returns:
+            Stability score from 0.0 (unstable/moving) to 1.0 (very stable)
+        """
+        if len(self.centroid_history) < 5:
+            return 0.0  # Not enough data
+
+        # Use last 20 positions (or all if less)
+        recent = self.centroid_history[-20:]
+        positions = np.array(recent)
+
+        # Calculate standard deviation of positions
+        row_std = np.std(positions[:, 0])
+        col_std = np.std(positions[:, 1])
+        avg_std = (row_std + col_std) / 2
+
+        # Convert to 0-1 score (lower std = higher stability)
+        # std of 0 = score 1.0, std of 5+ = score ~0
+        stability = 1.0 / (1.0 + avg_std)
+
+        return float(stability)
 
     def reset(self):
         """Reset tracker state."""
