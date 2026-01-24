@@ -73,14 +73,13 @@ Four horizontal bars showing signal strength for each direction-tuned region:
 - Vy- (down-tuned)
 
 #### Heatmap Card
-Two small heatmaps (side by side):
+One small heatmap:
 - **Live Activity**: Current high-gamma power map with center marker
-- **Memory Map**: Accumulated structure showing all 4 regions
 
 ### Footer (Controls)
 - Backend URL input field
 - Connect/Disconnect button
-- Reset button (clears tracking memory)
+- Reset button (clears tracking state)
 
 ## UI States
 
@@ -134,16 +133,13 @@ The frontend expects WebSocket messages from the backend.
   "distance": 2.3,
   "move_row": 0.3,
   "move_col": -0.2,
-  "spots": [[10, 12, 0.8], [20, 12, 0.7], ...],
-  "spots_mem": [[10, 12, 0.8], ...],
   "regions": {
-    "vx_pos": [15.5, 22.0, 0.9],
-    "vx_neg": [15.5, 8.0, 0.85],
-    "vy_pos": [8.0, 15.5, 0.7],
-    "vy_neg": [22.0, 15.5, 0.6]
+    "anchor_1": [15.5, 22.0, 0.9],
+    "anchor_2": [15.5, 8.0, 0.85],
+    "anchor_3": [8.0, 15.5, 0.7],
+    "anchor_4": [22.0, 15.5, 0.6]
   },
-  "heatmap": [[...], ...],
-  "memory": [[...], ...]
+  "heatmap": [[...], ...]
 }
 ```
 
@@ -165,7 +161,7 @@ This is because moving the array in direction X causes the signal to appear to m
 ## Performance
 
 - UI updates at 10-20 Hz (configurable via backend)
-- Heatmaps are optional (can be disabled for bandwidth)
+- Heatmap is optional (can be disabled for bandwidth)
 - All rendering is lightweight (no heavy frameworks)
 
 ## Mobile Support

@@ -30,11 +30,7 @@ from rich.panel import Panel
 from scipy.ndimage import gaussian_filter
 from scipy.signal import butter, iirnotch, sosfilt, tf2sos
 
-from scripts.hotspot_tracker import (
-    InterpretableClusterTracker,
-    SimpleKalmanFilter2D,
-    extract_peak_observations,
-)
+from scripts.hotspot_tracker import InterpretableClusterTracker, SimpleKalmanFilter2D
 
 app = typer.Typer(help="Realtime processing backend for the OR 'Compass' UI")
 console = Console()
@@ -42,22 +38,20 @@ console = Console()
 
 @dataclass
 class FilterBank:
-    sos_notch: list[np.ndarray]
+    sos_notch: np.ndarray
     sos_band: np.ndarray
-    zi_notch: list[np.ndarray]
+    zi_notch: np.ndarray
     zi_band: np.ndarray
 
 
 def _make_filterbank(fs: float, n_channels: int) -> FilterBank:
-    # Notch 60Hz (line noise) + 120Hz harmonic and bandpass high-gamma.
-    sos_notch = []
-    zi_notch = []
+    # Notch 60Hz line noise and 120Hz harmonic before high-gamma bandpass.
+    sos_sections = []
     for f0 in (60.0, 120.0):
         b, a = iirnotch(w0=f0, Q=30.0, fs=fs)
-        sos = tf2sos(b, a).astype(np.float32)
-        sos_notch.append(sos)
-        zi_notch.append(np.zeros((sos.shape[0], 2, n_channels), dtype=np.float32))
-
+        sos_sections.append(tf2sos(b, a).astype(np.float32))
+    sos_notch = np.vstack(sos_sections)
+    zi_notch = np.zeros((sos_notch.shape[0], 2, n_channels), dtype=np.float32)
     sos_band = butter(4, [70.0, 150.0], btype="band", fs=fs, output="sos").astype(
         np.float32
     )
@@ -101,38 +95,25 @@ class CompassProcessor:
         self.badness = np.zeros((self.n_channels,), dtype=np.float32)
         self.bad_mask = np.zeros((self.n_channels,), dtype=bool)
         self.bad_decay = 0.97
-        self.bad_on = 0.03
+        self.bad_gain = 0.03
         self.bad_z_hi = 6.0
         self.bad_z_lo = -3.0
         self.bad_thresh = 0.6
         self.z_cap = 8.0
-        self.supp_peak_n = 6
-        self.supp_smooth_sigma = 1.0
-        self.supp_suppress_radius = 6
-        self.supp_com_radius = 2
-        self.supp_min_abs = 0.2
-        self.supp_bg_sigma = 2.5
-        self.supp_bg_scale = 0.7
-        self.supp_blob_sigma = 1.2
-        self.supp_floor = 0.15
 
-        # Interpretable peak+memory tracker (no fixed 4-region assumption).
+        # Interpretable peak tracker with persistent tracks (no fixed 4-region assumption).
         self.tracker = InterpretableClusterTracker(grid_size=self.grid_size)
 
-        # Kalman filter for smooth, dynamic center tracking.
+        # Kalman smoothing: damp jitter while allowing abrupt user-driven moves.
         self.kalman = SimpleKalmanFilter2D(
-            process_noise=0.15,
-            measurement_noise=2.0,
+            process_noise=0.2,
+            measurement_noise=2.5,
             initial_pos=(self.grid_size / 2, self.grid_size / 2),
         )
         self.conf_alpha = 0.3
         self.conf_ema: float | None = None
-        self.mem_fallback_conf = 0.35
+        self.anchor_fallback_conf = 0.35
         self.anchor_age_tau = self.tracker.age_tau_updates
-        self.mem_display_peaks = 4
-        self.mem_display_sigma = 1.0
-        self.mem_display_min = 0.25
-        self.mem_display_floor = 0.35
 
     def _build_channel_map(self, channels_coords: list[list[int]] | None) -> np.ndarray | None:
         if not channels_coords:
@@ -179,15 +160,18 @@ class CompassProcessor:
         x = x - x.mean(axis=1, keepdims=True)
 
         # Causal filtering.
-        for idx, sos in enumerate(self.fb.sos_notch):
-            x, self.fb.zi_notch[idx] = sosfilt(sos, x, axis=0, zi=self.fb.zi_notch[idx])
+        x, self.fb.zi_notch = sosfilt(
+            self.fb.sos_notch, x, axis=0, zi=self.fb.zi_notch
+        )
         x, self.fb.zi_band = sosfilt(self.fb.sos_band, x, axis=0, zi=self.fb.zi_band)
 
         # Flag channels with persistent extreme variance (dead or artifact).
         var = np.var(x, axis=0)
         z_var = _robust_z(var)
         bad_now = (z_var > self.bad_z_hi) | (z_var < self.bad_z_lo)
-        self.badness = self.bad_decay * self.badness + self.bad_on * bad_now.astype(np.float32)
+        self.badness = self.bad_decay * self.badness + self.bad_gain * bad_now.astype(
+            np.float32
+        )
         self.bad_mask = self.badness > self.bad_thresh
 
         # High-gamma power estimate over the batch.
@@ -214,23 +198,20 @@ class CompassProcessor:
 
         grid = self._to_grid(z)
         grid = gaussian_filter(grid, sigma=self.spatial_sigma)
-        grid_supp = self._suppressed_display(grid)
-        if grid_supp is None:
-            grid_supp = np.zeros_like(grid)
-        track_grid = grid
-        cr, cc, conf, memory, spots, track_states = self.tracker.update(track_grid, dt_s=dt)
+        cr, cc, conf, track_states = self.tracker.update(grid, dt_s=dt)
         if cr is None or cc is None:
             return None
 
         anchor_r, anchor_c = self._anchor_center(track_states)
-        if anchor_r is not None and anchor_c is not None and conf < self.mem_fallback_conf:
-            w = float(np.clip(conf / max(1e-3, self.mem_fallback_conf), 0.0, 1.0))
+        if anchor_r is not None and anchor_c is not None and conf < self.anchor_fallback_conf:
+            w = float(
+                np.clip(conf / max(1e-3, self.anchor_fallback_conf), 0.0, 1.0)
+            )
             meas_r = w * float(cr) + (1.0 - w) * float(anchor_r)
             meas_c = w * float(cc) + (1.0 - w) * float(anchor_c)
         else:
             meas_r, meas_c = float(cr), float(cc)
 
-        # Kalman smoothing for dynamic stability.
         self.kalman.predict(dt=dt)
         self.kalman.update(np.array([meas_r, meas_c], dtype=float), confidence=max(0.1, conf))
         smooth_cr, smooth_cc = self.kalman.position
@@ -251,7 +232,6 @@ class CompassProcessor:
             self.conf_ema = (1.0 - self.conf_alpha) * self.conf_ema + self.conf_alpha * conf
         conf = float(self.conf_ema)
 
-        spots_mem = [(r, c, s) for (r, c, s, _age) in track_states]
         regions = {}
         track_sorted = sorted(track_states, key=lambda x: float(x[2]), reverse=True)
         for idx, (r, c, s, _age) in enumerate(track_sorted[:4], start=1):
@@ -265,13 +245,9 @@ class CompassProcessor:
             "distance": dist,
             "move_row": move_r,
             "move_col": move_c,
-            "spots": [[float(r), float(c), float(v)] for (r, c, v) in (spots or [])],
-            "spots_mem": [[float(r), float(c), float(v)] for (r, c, v) in (spots_mem or [])],
             "regions": {k: [float(v[0]), float(v[1]), float(v[2])] for (k, v) in regions.items()},
             # JSON-friendly payload (32x32 is small enough for local UI at ~15 Hz).
             "heatmap": grid.astype(np.float32).tolist(),
-            "heatmap_suppressed": grid_supp.astype(np.float32).tolist(),
-            "memory": None,
         }
         if cursor_data:
             vx = [float(c.get("vx", 0.0)) for c in cursor_data if isinstance(c, dict)]
@@ -279,12 +255,10 @@ class CompassProcessor:
             if vx and vy:
                 frame["cursor_vx"] = float(np.mean(vx))
                 frame["cursor_vy"] = float(np.mean(vy))
-        mem_display = self._memory_display(memory)
-        frame["memory"] = None if mem_display is None else mem_display.astype(np.float32).tolist()
         return frame
 
     def reset(self) -> None:
-        """Reset all causal state (filters, EMA, and tracker memory)."""
+        """Reset all causal state (filters, EMA, and tracker state)."""
         self.fb = _make_filterbank(self.fs, self.n_channels)
         self.ema[:] = 0.0
         self._last_t = None
@@ -315,70 +289,6 @@ class CompassProcessor:
         r = float(np.sum([p[0] * w for p, w in zip(pts, weights)]) / wsum)
         c = float(np.sum([p[1] * w for p, w in zip(pts, weights)]) / wsum)
         return r, c
-
-    def _memory_display(self, memory: np.ndarray | None) -> np.ndarray | None:
-        if memory is None:
-            return None
-        peaks = extract_peak_observations(
-            memory,
-            n_peaks=self.mem_display_peaks,
-            smooth_sigma=0.6,
-            suppress_radius=4,
-            com_radius=1,
-            min_abs=self.mem_display_min,
-        )
-        if not peaks:
-            return None
-        disp = np.zeros_like(memory, dtype=float)
-        for r, c, v in peaks:
-            rr = int(round(float(r)))
-            cc = int(round(float(c)))
-            if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
-                disp[rr, cc] = max(disp[rr, cc], float(v))
-        if self.mem_display_sigma > 0:
-            disp = gaussian_filter(disp, sigma=self.mem_display_sigma)
-        mx = float(disp.max())
-        if mx > 0:
-            disp = disp / mx
-            if self.mem_display_floor > 0:
-                disp[disp < self.mem_display_floor] = 0.0
-                if float(disp.max()) <= 0:
-                    return None
-        return disp
-
-    def _suppressed_display(self, grid: np.ndarray) -> np.ndarray | None:
-        g = np.maximum(grid.astype(float), 0.0)
-        scale = float(np.percentile(g, 99.0)) + 1e-6
-        g_norm = np.clip(g / scale, 0.0, 1.0)
-        bg = gaussian_filter(g_norm, sigma=self.supp_bg_sigma)
-        hi = np.maximum(0.0, g_norm - self.supp_bg_scale * bg)
-        peaks = extract_peak_observations(
-            hi,
-            n_peaks=self.supp_peak_n,
-            smooth_sigma=self.supp_smooth_sigma,
-            suppress_radius=self.supp_suppress_radius,
-            com_radius=self.supp_com_radius,
-            min_abs=self.supp_min_abs,
-        )
-        if not peaks:
-            return None
-        disp = np.zeros_like(g_norm)
-        for r, c, v in peaks:
-            rr = int(round(float(r)))
-            cc = int(round(float(c)))
-            if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
-                disp[rr, cc] = max(disp[rr, cc], float(v))
-        if self.supp_blob_sigma > 0:
-            disp = gaussian_filter(disp, sigma=self.supp_blob_sigma)
-        mx = float(disp.max())
-        if mx > 0:
-            disp = disp / mx
-            if self.supp_floor > 0:
-                disp[disp < self.supp_floor] = 0.0
-                if float(disp.max()) <= 0:
-                    return None
-        return disp
-
 
 class CompassServer:
     def __init__(
@@ -481,8 +391,6 @@ class CompassServer:
 
                             if not self.include_heatmaps:
                                 frame.pop("heatmap", None)
-                                frame.pop("heatmap_suppressed", None)
-                                frame.pop("memory", None)
 
                             await self.broadcast({"type": "compass_frame", **frame})
             except Exception as e:
@@ -514,7 +422,7 @@ def main(
     port: int = typer.Option(8767, help="Port for the UI websocket"),
     ui_hz: float = typer.Option(15.0, help="UI update rate (Hz)"),
     heatmaps: bool = typer.Option(
-        True, "--heatmaps/--no-heatmaps", help="Send heatmap + memory arrays"
+        True, "--heatmaps/--no-heatmaps", help="Send live heatmap array"
     ),
     ema_tau_s: float = typer.Option(
         0.20, help="Temporal smoothing (EMA time constant, seconds)"

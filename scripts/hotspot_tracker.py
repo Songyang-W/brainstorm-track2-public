@@ -64,10 +64,12 @@ def extract_peak_observations(
 
 class PersistentSpotClusterTracker:
     """
-    Track hotspot components across time with explicit memory.
+    Track hotspot components across time with persistent tracks.
 
-    Estimates frame-to-frame drift from observed peaks, and propagates that drift
-    to maintain stable tracks even when peaks drop out.
+    Updates matched tracks via EMA. Applies conservative drift correction only
+    to unmatched tracks based on the mean displacement of matched pairs. This
+    helps tracks follow the signal when they temporarily drop out, while
+    preventing cumulative error from aggressive drift propagation.
     """
 
     def __init__(
@@ -78,6 +80,7 @@ class PersistentSpotClusterTracker:
         strength_gain: float = 0.3,
         strength_decay: float = 0.98,
         max_age: int = 240,
+        drift_factor: float = 0.1,  # Conservative drift: apply 10% of estimated drift
     ):
         self.max_tracks = int(max_tracks)
         self.ema_alpha = float(ema_alpha)
@@ -85,6 +88,7 @@ class PersistentSpotClusterTracker:
         self.strength_gain = float(strength_gain)
         self.strength_decay = float(strength_decay)
         self.max_age = int(max_age)
+        self.drift_factor = float(drift_factor)
         self._tracks: list[dict[str, object]] = []
 
     def reset(self) -> None:
@@ -130,31 +134,35 @@ class PersistentSpotClusterTracker:
 
         row_ind, col_ind = linear_sum_assignment(cost)
         matches = []
+        matched_tracks = set()
         unmatched_obs = set(range(o_count))
         for i, j in zip(row_ind, col_ind):
             if cost[i, j] <= self.max_match_dist:
                 matches.append((i, j))
+                matched_tracks.add(i)
                 unmatched_obs.discard(j)
 
-        # Estimate drift from matched pairs.
+        # Estimate drift from matched pairs (for unmatched track correction).
         if matches:
             deltas = [obs[j] - self._tracks[i]["pos"] for (i, j) in matches]
-            delta = np.mean(deltas, axis=0)
+            drift = np.mean(deltas, axis=0) * self.drift_factor
         else:
-            delta = np.array([0.0, 0.0], dtype=float)
+            drift = np.array([0.0, 0.0], dtype=float)
 
-        if np.any(delta):
-            for tr in self._tracks:
-                tr["pos"] = tr["pos"] + delta
+        # Apply conservative drift only to UNMATCHED tracks.
+        if np.any(drift):
+            for i, tr in enumerate(self._tracks):
+                if i not in matched_tracks:
+                    tr["pos"] = tr["pos"] + drift
 
-        # Correct matched tracks.
+        # Update matched tracks via EMA.
         for i, j in matches:
             tr = self._tracks[i]
             tr["pos"] = (1 - self.ema_alpha) * tr["pos"] + self.ema_alpha * obs[j]
             tr["strength"] = min(1.0, tr["strength"] + self.strength_gain)
             tr["age"] = 0
 
-        # Spawn new tracks.
+        # Spawn new tracks for unmatched observations.
         for j in list(unmatched_obs):
             if len(self._tracks) >= self.max_tracks:
                 break
@@ -186,9 +194,9 @@ class PersistentSpotClusterTracker:
 
 class InterpretableClusterTracker:
     """
-    Interpretable tracker using peaks + persistent memory.
+    Interpretable tracker using peaks + persistent tracks.
 
-    Returns a stable center, confidence score, and long-memory map of anchors.
+    Returns a stable center and confidence score based on tracked anchors.
     """
 
     def __init__(
@@ -205,12 +213,6 @@ class InterpretableClusterTracker:
         strength_gain: float = 0.3,
         strength_decay: float = 0.98,
         max_age: int = 240,
-        memory_half_life_s: float = 45.0,
-        memory_sigma: float = 1.0,
-        memory_update_conf: float = 0.25,
-        memory_center_percentile: float = 85.0,
-        memory_top_k: int = 4,
-        memory_gain: float = 0.25,
         age_tau_updates: float = 120.0,
         conf_strength_weight: float = 0.7,
         conf_count_weight: float = 0.3,
@@ -230,20 +232,12 @@ class InterpretableClusterTracker:
             strength_decay=strength_decay,
             max_age=max_age,
         )
-        self.memory_half_life_s = float(memory_half_life_s)
-        self.memory_sigma = float(memory_sigma)
-        self.memory_update_conf = float(memory_update_conf)
-        self.memory_center_percentile = float(memory_center_percentile)
-        self.memory_top_k = int(memory_top_k)
-        self.memory_gain = float(memory_gain)
         self.age_tau_updates = float(age_tau_updates)
         self.conf_strength_weight = float(conf_strength_weight)
         self.conf_count_weight = float(conf_count_weight)
-        self.memory_map: np.ndarray | None = None
 
     def reset(self) -> None:
         self.tracker.reset()
-        self.memory_map = None
 
     def _age_weight(self, age: int) -> float:
         return float(np.exp(-float(age) / max(1.0, self.age_tau_updates)))
@@ -263,63 +257,12 @@ class InterpretableClusterTracker:
             )
         )
 
-    def _update_memory(
-        self,
-        track_states: list[tuple[float, float, float, int]],
-        center_rc: tuple[float, float] | None,
-        dt_s: float,
-        conf: float,
-    ) -> np.ndarray:
-        if self.memory_map is None:
-            self.memory_map = np.zeros((self.grid_size, self.grid_size), dtype=float)
-        decay = 0.5 ** (dt_s / max(1e-3, self.memory_half_life_s))
-        self.memory_map *= decay
-
-        if not track_states or conf < self.memory_update_conf or center_rc is None:
-            return self.memory_map
-
-        upd = np.zeros_like(self.memory_map)
-        center_r, center_c = center_rc
-        track_states = sorted(track_states, key=lambda x: float(x[2]), reverse=True)
-        for r, c, s, age in track_states[: self.memory_top_k]:
-            rr = int(round(float(r) - float(center_r) + self.mid))
-            cc = int(round(float(c) - float(center_c) + self.mid))
-            if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
-                val = float(s) * self._age_weight(int(age))
-                if val > upd[rr, cc]:
-                    upd[rr, cc] = val
-
-        if float(upd.max()) > 0:
-            if self.memory_sigma > 0:
-                upd = ndimage.gaussian_filter(upd, sigma=self.memory_sigma)
-            self.memory_map = np.clip(self.memory_map + self.memory_gain * upd, 0.0, 1.0)
-        return self.memory_map
-
-    def memory_center(self) -> tuple[float | None, float | None]:
-        if self.memory_map is None:
-            return None, None
-        mem = self.memory_map
-        mx = float(mem.max())
-        if mx <= 0:
-            return None, None
-        thr = float(np.percentile(mem, self.memory_center_percentile))
-        mask = mem >= thr
-        total = float((mem * mask).sum())
-        if total <= 0:
-            return None, None
-        rows, cols = np.indices(mem.shape)
-        r = float((rows * mem * mask).sum() / total)
-        c = float((cols * mem * mask).sum() / total)
-        return r, c
-
     def update(
         self, grid: np.ndarray, dt_s: float = 0.05
     ) -> tuple[
         float | None,
         float | None,
         float,
-        np.ndarray | None,
-        list[tuple[float, float, float]],
         list[tuple[float, float, float, int]],
     ]:
         g = np.maximum(grid.astype(float), 0.0)
@@ -336,22 +279,20 @@ class InterpretableClusterTracker:
         cr, cc, _tracks = self.tracker.update(observations)
         track_states = self.tracker.track_states()
         conf = self._confidence(track_states)
-        center_rc = (float(cr), float(cc)) if cr is not None and cc is not None else None
-        memory = self._update_memory(track_states, center_rc, dt_s, conf)
-        return cr, cc, conf, memory, observations, track_states
+        return cr, cc, conf, track_states
 
 
 class SimpleKalmanFilter2D:
     """
-    Simple 2D Kalman filter with constant-velocity model.
+    2D Kalman filter with constant-velocity state.
 
-    State: [row, col, vel_row, vel_col]
+    Used only to stabilize UI center output, not to drive tracking.
     """
 
     def __init__(
         self,
-        process_noise: float = 0.15,
-        measurement_noise: float = 2.0,
+        process_noise: float = 0.2,
+        measurement_noise: float = 2.5,
         initial_pos: tuple[float, float] = (15.5, 15.5),
     ):
         self.x = np.array([initial_pos[0], initial_pos[1], 0.0, 0.0], dtype=float)
@@ -406,7 +347,3 @@ class SimpleKalmanFilter2D:
     @property
     def position(self) -> tuple[float, float]:
         return (float(self.x[0]), float(self.x[1]))
-
-    @property
-    def velocity(self) -> tuple[float, float]:
-        return (float(self.x[2]), float(self.x[3]))

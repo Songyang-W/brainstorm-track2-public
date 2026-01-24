@@ -9,9 +9,9 @@ Added a `SimpleKalmanFilter2D` class that smooths the center estimate for UI dis
 - **State vector**: `[row, col, vel_row, vel_col]` (position + velocity)
 - **Process model**: Constant velocity with configurable noise
 - **Measurement**: Raw center from `InterpretableClusterTracker`
-- **Effect**: Eliminates jittery center movement in UI without affecting tracking accuracy
+- **Effect**: Removes jitter while still allowing abrupt user-driven moves (process noise is set high)
 
-The Kalman filter is applied **after** the core tracker runs, so it only affects what the UI displays, not the underlying tracking metrics.
+The Kalman filter runs **after** the core tracker, so it does not change which anchors are tracked—only the reported center.
 
 ### 2. Simplified UI Design
 
@@ -33,14 +33,12 @@ Completely redesigned the UI with one goal: **answer "which way to move?" instan
 
 ### 3. Interpretable Tracker for Noisy Data
 
-Replaced the four-region tracker with a peak-based, memory-backed tracker that
+Replaced the four-region tracker with a peak-based tracker that
 does not assume fixed Vx/Vy regions. It:
 - extracts top peaks each frame (robust to noise)
 - keeps a persistent set of peak tracks (interpretable anchors)
 - outputs a confidence based on track strength + count
-- maintains a long-memory map for debug UI
-- uses memory as a fallback anchor when confidence is low
-  - memory is center-aligned so it represents stable anchors, not drift trails
+- uses a weighted anchor fallback when confidence is low
 
 ### 4. Signal Conditioning for Hard Mode
 
@@ -58,17 +56,27 @@ does not assume fixed Vx/Vy regions. It:
 - `example_app/style.css` - New clinical light theme
 - `example_app/app.js` - New state management and rendering
 
-## Current Performance (defaults)
+## Current Performance (120-second evaluation)
 
-| Dataset | center_rmse | move_cos median |
-|---------|-------------|----------------|
-| medium | 3.531 | 0.979 |
-| hard | 3.520 | 0.951 |
+| Dataset | center_rmse | center_mae | move_cos median |
+|---------|-------------|------------|-----------------|
+| super_easy | 3.625 | 3.222 | 0.978 |
+| medium | 3.464 | 3.081 | 0.979 |
+| hard | 4.449 | 3.974 | 0.949 |
 
-These defaults are tuned for noisy `medium`/`hard` data while keeping the UI stable.
+Defaults: `ema_tau_s=0.20`, `spatial_sigma=1.2`, `drift_factor=0.1`,
+`kalman process_noise=0.2`, `measurement_noise=2.5`
 
-Evaluation now uses time-interpolated ground truth (instead of nearest sample)
+Evaluation uses time-interpolated ground truth (instead of nearest sample)
 to reduce timing bias at batch boundaries.
+
+### Key Algorithmic Improvement: Conservative Drift Correction
+
+The tracker no longer propagates global drift to all tracks. Instead:
+- Matched tracks are updated directly via EMA
+- Unmatched tracks receive only 10% of the estimated drift
+- This prevents cumulative error from aggressive drift propagation
+- Error no longer accumulates over time (confirmed via time-segment analysis)
 
 ## UI States
 
@@ -96,7 +104,6 @@ uv run brainstorm-serve
 
 Enable "Show debug view" in controls to see:
 - Live activity heatmap
-- Memory map
 - Center coordinates
 - Confidence percentage
 - Distance value
