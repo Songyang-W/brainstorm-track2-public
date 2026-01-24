@@ -1,510 +1,811 @@
 """
 Hotspot Detection and Tracking Algorithm for BrainStorm Track 2
 
-Real-time pipeline that processes neural data and computes velocity predictions
-simultaneously with visualization. Uses live_video.py's filtering approach.
+This module detects neural hotspots (high activity regions) in the 32x32 channel grid
+and predicts cursor velocity based on hotspot positions.
 
-Pipeline:
+Processing Pipeline:
     Raw Data (500 Hz, 1024 channels)
         │
         ▼
-    LiveProcessor (Bandpass 70-150Hz + EMA smoothing)
+    Bandpass Filter (e.g., 70-150 Hz)
         │
         ▼
-    UNet AI Denoising
+    Power/Envelope Extraction
         │
         ▼
-    Hotspot Detection + Velocity Prediction (computed same frame)
+    Temporal Smoothing (EMA or sliding window)
         │
         ▼
-    Real-time OpenCV Visualization
+    Reshape to 32×32 Grid
+        │
+        ▼
+    Spatial Smoothing (optional)
+        │
+        ▼
+    Hotspot Detection & Velocity Prediction
 
 Usage:
     python scripts/hotspot_tracker.py
 """
 
-import torch
-import torch.nn as nn
 import numpy as np
 import pandas as pd
-import cv2
-from scipy.signal import butter, sosfilt
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from scipy import ndimage
+from scipy.signal import butter, sosfiltfilt, hilbert
+from scipy.stats import pearsonr
 from pathlib import Path
 
 
 # =============================================================================
-# 1. LIVE SIGNAL PROCESSOR (from live_video.py)
+# Signal Processing Pipeline
 # =============================================================================
-class LiveProcessor:
-    """Real-time signal processor with stateful filtering."""
+
+class SignalProcessor:
+    """
+    Signal processing pipeline for neural data.
     
-    def __init__(self, fs=500, n_channels=1024):
-        self.fs = fs
-        self.sos = butter(4, [70, 150], btype='band', fs=fs, output='sos')
-        n_sections = self.sos.shape[0]
-        self.zi = np.zeros((n_sections, 2, n_channels))
-        self.prev_smooth = None
-        self.alpha = 0.2 
-
-    def process_packet(self, raw_packet):
-        """Process a packet of raw data and return smoothed 32x32 grid."""
-        filtered, self.zi = sosfilt(self.sos, raw_packet, axis=0, zi=self.zi)
-        power = filtered ** 2
-        avg_power = np.mean(power, axis=0)
-        grid = avg_power.reshape(32, 32)
-        
-        if self.prev_smooth is None:
-            self.prev_smooth = grid
-        else:
-            self.prev_smooth = self.alpha * grid + (1 - self.alpha) * self.prev_smooth
-            
-        return self.prev_smooth
-
-
-# =============================================================================
-# 2. UNET DENOISING MODEL (from live_video.py)
-# =============================================================================
-class MedicalUNet(nn.Module):
-    """U-Net autoencoder for denoising neural activity grids."""
+    Pipeline:
+    1. Bandpass filter (extract frequency band of interest)
+    2. Power/envelope extraction (Hilbert transform or squaring)
+    3. Temporal smoothing (EMA or sliding window)
+    4. Reshape to 32x32 grid
+    5. Spatial smoothing (Gaussian blur)
+    """
     
-    def __init__(self):
-        super(MedicalUNet, self).__init__()
-        self.e1 = nn.Sequential(nn.Conv2d(1, 16, 3, 1, 1), nn.ReLU(), nn.Conv2d(16, 16, 3, 1, 1), nn.ReLU())
-        self.pool1 = nn.MaxPool2d(2, 2)
-        self.e2 = nn.Sequential(nn.Conv2d(16, 32, 3, 1, 1), nn.ReLU(), nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU())
-        self.pool2 = nn.MaxPool2d(2, 2)
-        self.bottleneck = nn.Sequential(nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU())
-        self.upconv1 = nn.ConvTranspose2d(64, 32, 2, 2)
-        self.d1 = nn.Sequential(nn.Conv2d(64, 32, 3, 1, 1), nn.ReLU()) 
-        self.upconv2 = nn.ConvTranspose2d(32, 16, 2, 2)
-        self.d2 = nn.Sequential(nn.Conv2d(32, 16, 3, 1, 1), nn.ReLU(), nn.Conv2d(16, 1, 1))
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        x1 = self.e1(x)
-        p1 = self.pool1(x1)
-        x2 = self.e2(p1)
-        p2 = self.pool2(x2)
-        b = self.bottleneck(p2)
-        d1 = self.upconv1(b)
-        d1 = torch.cat((d1, x2), dim=1)
-        d1 = self.d1(d1)
-        d2 = self.upconv2(d1)
-        d2 = torch.cat((d2, x1), dim=1)
-        d2 = self.d2(d2)
-        return self.sigmoid(d2)
-
-
-# =============================================================================
-# 3. VELOCITY TRACKER - Computes velocity from denoised grid
-# =============================================================================
-class VelocityTracker:
-    """Computes cursor velocity from denoised neural activity grid."""
-    
-    def __init__(self, smoothing_alpha=0.3):
-        self.smoothing_alpha = smoothing_alpha
-        self.prev_vx = 0.0
-        self.prev_vy = 0.0
-        self.cursor_x = 0.0
-        self.cursor_y = 0.0
-        self.history_x = [0.0]
-        self.history_y = [0.0]
-        
-    def compute_velocity(self, denoised_grid):
+    def __init__(self, fs=500, lowcut=70, highcut=150, 
+                 ema_alpha=0.1, spatial_sigma=1.0,
+                 envelope_method='hilbert'):
         """
-        Compute velocity from intensity-weighted center of mass.
+        Initialize the signal processor.
         
         Args:
-            denoised_grid: 32x32 numpy array (0-1 confidence values)
+            fs: Sampling frequency (Hz)
+            lowcut: Low cutoff for bandpass filter (Hz)
+            highcut: High cutoff for bandpass filter (Hz)
+            ema_alpha: Exponential moving average smoothing factor (0-1)
+                       Higher = more responsive, Lower = more smooth
+            spatial_sigma: Gaussian smoothing sigma for spatial filtering
+            envelope_method: 'hilbert' or 'square' for envelope extraction
+        """
+        self.fs = fs
+        self.lowcut = lowcut
+        self.highcut = highcut
+        self.ema_alpha = ema_alpha
+        self.spatial_sigma = spatial_sigma
+        self.envelope_method = envelope_method
+        
+        # Pre-compute filter coefficients
+        self.sos = butter(4, [lowcut, highcut], btype='band', fs=fs, output='sos')
+        
+        # State for real-time EMA smoothing
+        self.ema_state = None
+
+        
+    def subtract_mean(self, data):
+        for row in data:
+            data[row, :] -= np.mean(data[row, :])
+        return data
+
+    def bandpass_filter(self, data):
+        """
+        Apply bandpass filter to extract frequency band of interest.
+        
+        Args:
+            data: numpy array (n_samples, n_channels) or (n_samples,)
             
         Returns:
-            (vx, vy, com_row, com_col, num_targets)
+            Filtered data with same shape
         """
-        # Threshold to find active zones
-        _, mask = cv2.threshold(denoised_grid.astype(np.float32), 0.2, 1.0, cv2.THRESH_BINARY)
-        mask_uint8 = (mask * 255).astype(np.uint8)
-        
-        # Find contours (targets)
-        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        num_targets = len(contours)
-        
-        # Compute intensity-weighted center of mass of entire grid
-        total_intensity = denoised_grid.sum()
-        
-        if total_intensity > 0.01:
-            rows, cols = np.mgrid[0:32, 0:32]
-            avg_row = (rows * denoised_grid).sum() / total_intensity
-            avg_col = (cols * denoised_grid).sum() / total_intensity
-            
-            # Convert to velocity (center is 15.5, 15.5)
-            raw_vx = (avg_col - 15.5) / 15.5
-            raw_vy = -(avg_row - 15.5) / 15.5  # Negative because row 0 is top
-            
-            # Smooth velocity
-            vx = self.smoothing_alpha * raw_vx + (1 - self.smoothing_alpha) * self.prev_vx
-            vy = self.smoothing_alpha * raw_vy + (1 - self.smoothing_alpha) * self.prev_vy
-            
-            self.prev_vx = vx
-            self.prev_vy = vy
-            
-            return vx, vy, avg_row, avg_col, num_targets
-        else:
-            # Decay velocity when no activity
-            self.prev_vx *= 0.9
-            self.prev_vy *= 0.9
-            return self.prev_vx, self.prev_vy, 15.5, 15.5, 0
+        return sosfiltfilt(self.sos, data, axis=0)
     
-    def update_cursor(self, vx, vy, speed_scale=5.0):
-        """Update cursor position based on velocity."""
-        self.cursor_x = np.clip(self.cursor_x + vx * speed_scale, -100, 100)
-        self.cursor_y = np.clip(self.cursor_y + vy * speed_scale, -100, 100)
+    def extract_envelope(self, filtered_data):
+        """
+        Extract power envelope from filtered signal.
         
-        self.history_x.append(self.cursor_x)
-        self.history_y.append(self.cursor_y)
+        Args:
+            filtered_data: Bandpass filtered data
+            
+        Returns:
+            Power envelope (amplitude squared or Hilbert envelope)
+        """
+        if self.envelope_method == 'hilbert':
+            # Hilbert transform gives instantaneous amplitude
+            analytic_signal = hilbert(filtered_data, axis=0)
+            envelope = np.abs(analytic_signal)
+        else:
+            # Simple squaring (power)
+            envelope = filtered_data ** 2
+            
+        return envelope
+    
+    def temporal_smooth_window(self, envelope, window_ms=100):
+        """
+        Apply sliding window temporal smoothing.
         
-        # Keep last 100 points
-        if len(self.history_x) > 100:
-            self.history_x = self.history_x[-100:]
-            self.history_y = self.history_y[-100:]
+        Args:
+            envelope: Power envelope data (n_samples, n_channels)
+            window_ms: Window size in milliseconds
+            
+        Returns:
+            Temporally smoothed data
+        """
+        window_samples = int(window_ms * self.fs / 1000)
+        kernel = np.ones(window_samples) / window_samples
         
-        return self.cursor_x, self.cursor_y
+        if envelope.ndim == 1:
+            return np.convolve(envelope, kernel, mode='same')
+        else:
+            smoothed = np.zeros_like(envelope)
+            for ch in range(envelope.shape[1]):
+                smoothed[:, ch] = np.convolve(envelope[:, ch], kernel, mode='same')
+            return smoothed
+    
+    def temporal_smooth_ema(self, envelope, reset=False):
+        """
+        Apply exponential moving average for real-time smoothing.
+        
+        Args:
+            envelope: Current envelope values (n_channels,) for single sample
+                      or (n_samples, n_channels) for batch
+            reset: Reset EMA state
+            
+        Returns:
+            EMA smoothed values
+        """
+        if reset or self.ema_state is None:
+            if envelope.ndim == 1:
+                self.ema_state = envelope.copy()
+            else:
+                self.ema_state = envelope[0].copy()
+        
+        if envelope.ndim == 1:
+            # Single sample update
+            self.ema_state = self.ema_alpha * envelope + (1 - self.ema_alpha) * self.ema_state
+            return self.ema_state
+        else:
+            # Batch processing
+            smoothed = np.zeros_like(envelope)
+            for i in range(envelope.shape[0]):
+                self.ema_state = self.ema_alpha * envelope[i] + (1 - self.ema_alpha) * self.ema_state
+                smoothed[i] = self.ema_state
+            return smoothed
+    
+    def reshape_to_grid(self, channel_data):
+        """
+        Reshape 1024 channels to 32x32 grid.
+        
+        Args:
+            channel_data: 1D array of 1024 values
+            
+        Returns:
+            32x32 numpy array
+        """
+        return np.array(channel_data).reshape(32, 32)
+    
+    def spatial_smooth(self, grid):
+        """
+        Apply Gaussian spatial smoothing to the grid.
+        
+        Args:
+            grid: 32x32 numpy array
+            
+        Returns:
+            Spatially smoothed 32x32 array
+        """
+        if self.spatial_sigma > 0:
+            return ndimage.gaussian_filter(grid, sigma=self.spatial_sigma)
+        return grid
+    
+    
+    def process_window(self, raw_data, use_ema=False, window_ms=100):
+        """
+        Full processing pipeline for a time window of data.
+        
+        Args:
+            raw_data: DataFrame or array (n_samples, 1024 channels)
+            use_ema: Use EMA instead of sliding window for temporal smoothing
+            window_ms: Window size for sliding window smoothing
+            
+        Returns:
+            Processed 32x32 grid
+        """
+        # Convert DataFrame to numpy if needed
+        if isinstance(raw_data, pd.DataFrame):
+            data = raw_data.values
+        else:
+            data = raw_data
+
+            
+        # Step 1: Bandpass filter
+        filtered = self.bandpass_filter(data)
+        
+        # Step 2: Extract envelope
+        envelope = self.extract_envelope(filtered)
+        
+        # Step 3: Temporal smoothing
+        if use_ema:
+            smoothed = self.temporal_smooth_ema(envelope)
+            # Take the last sample (most recent)
+            channel_values = smoothed[-1] if smoothed.ndim > 1 else smoothed
+        else:
+            smoothed = self.temporal_smooth_window(envelope, window_ms)
+            # Take the mean across time window
+            channel_values = smoothed.mean(axis=0)
+        
+        # Step 4: Reshape to grid
+        grid = self.reshape_to_grid(channel_values)
+        
+        # Step 5: Spatial smoothing
+        grid = self.spatial_smooth(grid)
+
+        
+        return grid
+    
+    def process_single_sample(self, sample_data, reset_ema=False):
+        """
+        Process a single sample for real-time streaming.
+        
+        Note: Bandpass filtering requires multiple samples, so this method
+        assumes pre-filtered data or uses a simple approach.
+        
+        Args:
+            sample_data: 1D array of 1024 channel values (already filtered)
+            reset_ema: Reset EMA state
+            
+        Returns:
+            Processed 32x32 grid
+        """
+        # For real-time, we assume data is already filtered
+        # Just do envelope + EMA + reshape + spatial smooth
+        envelope = sample_data ** 2 if self.envelope_method != 'hilbert' else np.abs(sample_data)
+        smoothed = self.temporal_smooth_ema(envelope, reset=reset_ema)
+        grid = self.reshape_to_grid(smoothed)
+        grid = self.spatial_smooth(grid)
+        return grid
 
 
-# =============================================================================
-# 4. MAIN REAL-TIME LOOP
-# =============================================================================
+class HotspotTracker:
+    """
+    Tracks neural hotspots and predicts cursor movement based on activity patterns.
+    
+    The algorithm:
+    1. Computes RMS power for each channel over a time window
+    2. Detects hotspots using thresholding + connected component labeling
+    3. Finds the centroid (weighted center of mass) of each hotspot
+    4. Predicts velocity based on hotspot position relative to grid center
+    """
+    
+    def __init__(self, threshold_percentile=85, min_spot_size=3, smoothing_sigma=1.5, max_gap=10):
+        """
+        Initialize the HotspotTracker.
+        
+        Parameters:
+        - threshold_percentile: Percentile above which activity is considered a hotspot
+        - min_spot_size: Minimum number of pixels to be considered a valid hotspot
+        - smoothing_sigma: Gaussian smoothing applied to the grid before detection
+        """
+        self.threshold_percentile = threshold_percentile
+        self.min_spot_size = min_spot_size
+        self.smoothing_sigma = smoothing_sigma
+        self.previous_hotspots = []
+        self.tracked_hotspots = []   # persistent list
+        self.max_gap = max_gap       # frames allowed to disappear
+        self.frame_count = 0
+    def detect_hotspots(self, grid):
+        """
+        Detect hotspots in the 32x32 grid.
+        
+        Args:
+            grid: 32x32 numpy array of power values
+            
+        Returns:
+            List of hotspots, each with: center_row, center_col, intensity, size
+        """
+        # Smooth the grid to reduce noise
+        smoothed = ndimage.gaussian_filter(grid, sigma=self.smoothing_sigma)
+        
+        # Threshold to find high activity regions
+        threshold = np.percentile(smoothed, self.threshold_percentile)
+        binary_mask = smoothed > threshold
+        
+        # Label connected regions
+        labeled, num_features = ndimage.label(binary_mask)
+        
+        hotspots = []
+        for i in range(1, num_features + 1):
+            spot_mask = labeled == i
+            spot_size = np.sum(spot_mask)
+            
+            # Skip tiny spots (noise)
+            if spot_size < self.min_spot_size:
+                continue
+            
+            # Calculate weighted centroid
+            rows, cols = np.where(spot_mask)
+            intensities = smoothed[spot_mask]
+            total_intensity = np.sum(intensities)
+            
+            center_row = np.sum(rows * intensities) / total_intensity
+            center_col = np.sum(cols * intensities) / total_intensity
+            # total_intensity = np.sum(intensities)
+
+            # if total_intensity <= 0 or not np.isfinite(total_intensity):
+            #     continue
+            
+            hotspots.append({
+                'center_row': center_row,
+                'center_col': center_col,
+                'intensity': np.mean(intensities),
+                'size': spot_size,
+                'max_intensity': np.max(intensities)
+            })
+            
+        
+        # Sort by intensity (strongest first)
+        hotspots.sort(key=lambda x: x['intensity'], reverse=True)
+        return hotspots
+    
+
+
+    def _match_hotspots(self, detected, max_dist=5.0):
+
+    # Match detected hotspots to existing tracked ones by proximity.
+
+        for h in self.tracked_hotspots:
+            h['active'] = False
+
+        for d in detected:
+            best = None
+            best_dist = np.inf
+
+            for h in self.tracked_hotspots:
+                dist = np.hypot(d['center_row'] - h['row'],
+                                d['center_col'] - h['col'])
+                if dist < best_dist and dist < max_dist:
+                    best = h
+                    best_dist = dist
+
+            if best is not None:
+                # Update existing hotspot
+                best['intensity'] = d['intensity']
+                best['last_seen'] = self.frame_count
+                best['active'] = True
+            else:
+                # New hotspot
+                self.tracked_hotspots.append({
+                    'row': d['center_row'],
+                    'col': d['center_col'],
+                    'intensity': d['intensity'],
+                    'last_seen': self.frame_count,
+                    'active': True
+                })
+
+
+
+    def _prune_hotspots(self):
+        self.tracked_hotspots = [
+            h for h in self.tracked_hotspots
+            if self.frame_count - h['last_seen'] <= self.max_gap
+        ]
+
+
+
+    def get_average_hotspot_center(self, hotspots, top_n=8):
+        """
+        Get the weighted average center of the top N hotspots.
+        
+        Args:
+            hotspots: List of detected hotspots
+            top_n: Number of top hotspots to average
+            
+        Returns:
+            (avg_row, avg_col) or (None, None) if no hotspots
+        """
+        if not hotspots:
+            return None, None
+        
+        top_hotspots = hotspots[:top_n]
+        total_weight = sum(h['intensity'] for h in top_hotspots)
+        
+        avg_row = sum(h['center_row'] * h['intensity'] for h in top_hotspots) / total_weight
+        avg_col = sum(h['center_col'] * h['intensity'] for h in top_hotspots) / total_weight
+        
+        return avg_row, avg_col
+    
+
+    
+    def track_and_predict(self, grid, top_n=6):
+        """
+        Main function: detect hotspots and predict cursor velocity.
+        
+        Args:
+            grid: 32x32 numpy array of power values
+            
+        Returns:
+            - hotspots: List of detected hotspots
+            - avg_center: (row, col) average center of hotspots
+            - velocity_prediction: (vx, vy) predicted cursor velocity (-1 to 1)
+        """
+        # hotspots = self.detect_hotspots(grid)
+        # avg_row, avg_col = self.get_average_hotspot_center(hotspots, 8)
+        
+        # if avg_row is not None:
+        #     # Convert grid position to velocity
+        #     # Hotspot right of center -> positive vx (moving right)
+        #     # Hotspot above center -> positive vy (moving up)
+        #     center = 15.5  # Center of 0-31 grid
+        #     vx_pred = (avg_col - center) / center  # Normalized -1 to 1
+        #     vy_pred = -(avg_row - center) / center  # Negative because row 0 is top
+        #     velocity_prediction = (vx_pred, vy_pred)
+        # else:
+        #     velocity_prediction = (0, 0)
+        
+        # self.previous_hotspots = hotspots
+        # return hotspots, (avg_row, avg_col), velocity_prediction
+    
+        self.frame_count += 1
+
+        detected = self.detect_hotspots(grid)
+        self._match_hotspots(detected)
+        self._prune_hotspots()
+
+        if not self.tracked_hotspots:
+            return [], (None, None), (0, 0)
+
+        # Weighted COM of ALL tracked hotspots (active or not)
+        weights = np.array([h['intensity'] for h in self.tracked_hotspots[:top_n]])
+        rows = np.array([h['row'] for h in self.tracked_hotspots[:top_n]])
+        cols = np.array([h['col'] for h in self.tracked_hotspots[:top_n]])
+
+        avg_row = np.sum(rows * weights) / np.sum(weights)
+        avg_col = np.sum(cols * weights) / np.sum(weights)
+
+        center = 15.5
+        vx = (avg_col - center) / center
+        vy = -(avg_row - center) / center
+
+        return self.tracked_hotspots, (avg_row, avg_col), (vx, vy)
+
+
 def load_data(difficulty="super_easy"):
-    """Load neural data and ground truth."""
+    """Load neural data and ground truth for a given difficulty."""
     data_path = Path(f"data/{difficulty}")
     
     neural_data = pd.read_parquet(data_path / "track2_data.parquet")
     ground_truth = pd.read_parquet(data_path / "ground_truth.parquet")
     
-    # Drop time column if present
-    if 'time_s' in neural_data.columns:
-        neural_data = neural_data.drop(columns=['time_s'])
-    
     print(f"Loaded {difficulty} dataset:")
-    print(f"  Neural data: {neural_data.shape[0]} samples, {neural_data.shape[1]} channels")
-    print(f"  Duration: {neural_data.shape[0] / 500:.1f} seconds")
+    print(f"  Neural data shape: {neural_data.shape}")
+    print(f"  Time range: {neural_data.index[0]:.2f}s to {neural_data.index[-1]:.2f}s")
     
-    return neural_data.values, ground_truth
+    return neural_data, ground_truth
 
 
-def run_realtime_tracking(data, ground_truth, model_path="scripts/compass_model.pth",
-                          start_sec=0, duration=30, target_fps=30):
+def compute_power_grid(df, t_start, window_size=0.5, processor=None):
     """
-    Run real-time hotspot tracking with simultaneous velocity computation.
+    Compute processed power grid for a time window using full pipeline.
     
-    All processing happens in one loop - no separate filtering step.
+    Args:
+        df: Neural data DataFrame
+        t_start: Start time in seconds
+        window_size: Window size in seconds
+        processor: SignalProcessor instance (creates default if None)
+        
+    Returns:
+        32x32 processed grid
     """
-    # Setup
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    packet_size = int(500 / target_fps)  # ~16 samples per frame at 30fps
+    if processor is None:
+        processor = SignalProcessor()
     
-    # Pre-smooth ground truth (it's at 500Hz, we display at 30fps)
-    # Average over each packet window for fair comparison
-    gt_vx_smooth = np.convolve(ground_truth['vx'].values, np.ones(packet_size)/packet_size, mode='same')
-    gt_vy_smooth = np.convolve(ground_truth['vy'].values, np.ones(packet_size)/packet_size, mode='same')
-    
-    # Load model
-    print(f"\nLoading UNet model from {model_path}...")
-    model = MedicalUNet().to(device)
-    try:
-        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
-        model.eval()
-        print(f"  ✓ Model loaded (device: {device})")
-    except Exception as e:
-        print(f"  ⚠️ Model load failed: {e}")
-        return
-    
-    # Initialize processors
-    dsp_processor = LiveProcessor(fs=500, n_channels=1024)
-    velocity_tracker = VelocityTracker(smoothing_alpha=0.3)
-    
-    # Calculate indices
-    start_idx = start_sec * 500
-    end_idx = start_idx + (duration * 500)
-    total_packets = (end_idx - start_idx) // packet_size
-    
-    print(f"\nStarting real-time tracking:")
-    print(f"  Time range: {start_sec}s to {start_sec + duration}s")
-    print(f"  Total packets: {total_packets}")
-    print(f"  Press 'q' to quit\n")
-    
-    # Storage for analysis
-    predictions = {'time': [], 'vx': [], 'vy': [], 'gt_vx': [], 'gt_vy': [], 'cursor_x': [], 'cursor_y': []}
-    
-    for i in range(total_packets):
-        # ==========================================
-        # STEP 1: Fetch raw packet
-        # ==========================================
-        packet_start = start_idx + (i * packet_size)
-        packet_end = packet_start + packet_size
-        raw_packet = data[packet_start:packet_end]
-        if len(raw_packet) == 0:
-            break
-        
-        current_time = start_sec + (i / target_fps)
-        
-        # ==========================================
-        # STEP 2: DSP filtering (bandpass + EMA)
-        # ==========================================
-        dsp_grid = dsp_processor.process_packet(raw_packet)
-        
-        # ==========================================
-        # STEP 3: AI denoising (UNet inference)
-        # ==========================================
-        p99 = np.percentile(dsp_grid, 99.5)
-        input_norm = np.clip(dsp_grid, 0, p99) / (p99 + 1e-9)
-        
-        tensor = torch.FloatTensor(input_norm).unsqueeze(0).unsqueeze(0).to(device)
-        with torch.no_grad():
-            output_tensor = model(tensor)
-            denoised_grid = output_tensor.squeeze().cpu().numpy()
-        
-        # ==========================================
-        # STEP 4: Velocity computation (SIMULTANEOUS)
-        # ==========================================
-        vx, vy, com_row, com_col, num_targets = velocity_tracker.compute_velocity(denoised_grid)
-        cursor_x, cursor_y = velocity_tracker.update_cursor(vx, vy)
-        
-        # Get smoothed ground truth for this packet
-        gt_idx = packet_start + packet_size // 2
-        gt_vx_val = gt_vx_smooth[gt_idx] if gt_idx < len(gt_vx_smooth) else 0
-        gt_vy_val = gt_vy_smooth[gt_idx] if gt_idx < len(gt_vy_smooth) else 0
-        
-        # Store predictions and ground truth
-        predictions['time'].append(current_time)
-        predictions['vx'].append(vx)
-        predictions['vy'].append(vy)
-        predictions['gt_vx'].append(gt_vx_val)
-        predictions['gt_vy'].append(gt_vy_val)
-        predictions['cursor_x'].append(cursor_x)
-        predictions['cursor_y'].append(cursor_y)
-        
-        # ==========================================
-        # STEP 5: Visualization (real-time OpenCV)
-        # ==========================================
-        
-        PANEL_SIZE = 300
-        HEADER_H = 25
-        scale = PANEL_SIZE / 32.0
-        
-        # --- PANEL 1: RAW DSP (Unfiltered - before UNet) ---
-        # Normalize raw DSP grid for display
-        raw_display = input_norm  # This is the normalized DSP output before UNet
-        raw_img = (raw_display * 255).astype(np.uint8)
-        raw_img = cv2.resize(raw_img, (PANEL_SIZE, PANEL_SIZE), interpolation=cv2.INTER_CUBIC)
-        raw_color = cv2.applyColorMap(raw_img, cv2.COLORMAP_VIRIDIS)
-        
-        # Compute center of mass for RAW data
-        raw_total = input_norm.sum()
-        if raw_total > 0.01:
-            rows, cols = np.mgrid[0:32, 0:32]
-            raw_com_row = (rows * input_norm).sum() / raw_total
-            raw_com_col = (cols * input_norm).sum() / raw_total
-        else:
-            raw_com_row, raw_com_col = 15.5, 15.5
-        
-        # Draw raw center of mass (red cross)
-        raw_screen_x = int((raw_com_col + 0.5) * scale)
-        raw_screen_y = int((raw_com_row + 0.5) * scale)
-        cv2.drawMarker(raw_color, (raw_screen_x, raw_screen_y), (0, 0, 255),
-                       markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
-        
-        header_raw = np.zeros((HEADER_H, PANEL_SIZE, 3), dtype=np.uint8)
-        header_raw[:] = (40, 40, 40)
-        cv2.putText(header_raw, "RAW DSP (Before UNet)", (5, 17), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 255, 100), 1)
-        panel_raw = np.vstack((header_raw, raw_color))
-        
-        # --- PANEL 2: AI DENOISED (Filtered - after UNet) ---
-        neural_img = (denoised_grid * 255).astype(np.uint8)
-        neural_img = cv2.resize(neural_img, (PANEL_SIZE, PANEL_SIZE), interpolation=cv2.INTER_CUBIC)
-        neural_color = cv2.applyColorMap(neural_img, cv2.COLORMAP_INFERNO)
-        
-        # Draw center of mass marker (yellow cross) - uses denoised data
-        screen_x = int((com_col + 0.5) * scale)
-        screen_y = int((com_row + 0.5) * scale)
-        cv2.drawMarker(neural_color, (screen_x, screen_y), (0, 255, 255),
-                       markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
-        
-        # Draw detected targets (green circles)
-        _, mask = cv2.threshold(denoised_grid.astype(np.float32), 0.2, 1.0, cv2.THRESH_BINARY)
-        mask_uint8 = (mask * 255).astype(np.uint8)
-        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for cnt in contours:
-            M = cv2.moments(cnt)
-            if M["m00"] > 0:
-                grid_x = M["m10"] / M["m00"]
-                grid_y = M["m01"] / M["m00"]
-                gx = int((grid_x + 0.5) * scale)
-                gy = int((grid_y + 0.5) * scale)
-                cv2.circle(neural_color, (gx, gy), 5, (0, 255, 0), 2)
-        
-        header_ai = np.zeros((HEADER_H, PANEL_SIZE, 3), dtype=np.uint8)
-        header_ai[:] = (40, 40, 40)
-        cv2.putText(header_ai, "AI DENOISED (After UNet)", (5, 17), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 200, 100), 1)
-        panel_ai = np.vstack((header_ai, neural_color))
-        
-        # --- PANEL 3: Cursor Trajectory ---
-        cursor_img = np.zeros((PANEL_SIZE, PANEL_SIZE, 3), dtype=np.uint8)
-        cursor_img[:] = (25, 25, 25)
-        
-        center = PANEL_SIZE // 2
-        cv2.line(cursor_img, (center, 0), (center, PANEL_SIZE), (50, 50, 50), 1)
-        cv2.line(cursor_img, (0, center), (PANEL_SIZE, center), (50, 50, 50), 1)
-        cv2.rectangle(cursor_img, (20, 20), (PANEL_SIZE-20, PANEL_SIZE-20), (60, 60, 60), 1)
-        
-        cursor_scale = (PANEL_SIZE - 40) / 200
-        history_x = velocity_tracker.history_x
-        history_y = velocity_tracker.history_y
-        for j in range(1, len(history_x)):
-            pt1_x = int(history_x[j-1] * cursor_scale + center)
-            pt1_y = int(-history_y[j-1] * cursor_scale + center)
-            pt2_x = int(history_x[j] * cursor_scale + center)
-            pt2_y = int(-history_y[j] * cursor_scale + center)
-            alpha = j / len(history_x)
-            color = (int(80 * alpha), int(150 * alpha), int(255 * alpha))
-            cv2.line(cursor_img, (pt1_x, pt1_y), (pt2_x, pt2_y), color, 2)
-        
-        cursor_screen_x = int(cursor_x * cursor_scale + center)
-        cursor_screen_y = int(-cursor_y * cursor_scale + center)
-        cv2.circle(cursor_img, (cursor_screen_x, cursor_screen_y), 10, (0, 180, 255), -1)
-        cv2.circle(cursor_img, (cursor_screen_x, cursor_screen_y), 10, (255, 255, 255), 2)
-        
-        header_cursor = np.zeros((HEADER_H, PANEL_SIZE, 3), dtype=np.uint8)
-        header_cursor[:] = (40, 40, 40)
-        cv2.putText(header_cursor, f"CURSOR ({cursor_x:.0f}, {cursor_y:.0f})", (5, 17), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1)
-        panel_cursor = np.vstack((header_cursor, cursor_img))
-        
-        # --- PANEL 4: Velocity Arrow ---
-        vel_img = np.zeros((PANEL_SIZE, PANEL_SIZE, 3), dtype=np.uint8)
-        vel_img[:] = (25, 25, 25)
-        
-        cv2.line(vel_img, (center, 0), (center, PANEL_SIZE), (50, 50, 50), 1)
-        cv2.line(vel_img, (0, center), (PANEL_SIZE, center), (50, 50, 50), 1)
-        cv2.circle(vel_img, (center, center), int(center * 0.8), (40, 40, 40), 1)
-        
-        arrow_scale = center * 0.8
-        arrow_end_x = int(center + vx * arrow_scale)
-        arrow_end_y = int(center - vy * arrow_scale)
-        cv2.arrowedLine(vel_img, (center, center), (arrow_end_x, arrow_end_y), 
-                        (255, 255, 0), 3, tipLength=0.2)
-        
-        header_vel = np.zeros((HEADER_H, PANEL_SIZE, 3), dtype=np.uint8)
-        header_vel[:] = (40, 40, 40)
-        cv2.putText(header_vel, f"VELOCITY ({vx:.2f}, {vy:.2f})", (5, 17), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 100), 1)
-        panel_vel = np.vstack((header_vel, vel_img))
-        
-        # --- Combine: Top row (Raw | AI), Bottom row (Cursor | Velocity) ---
-        top_row = np.hstack((panel_raw, panel_ai))
-        bottom_row = np.hstack((panel_cursor, panel_vel))
-        combined = np.vstack((top_row, bottom_row))
-        
-        # --- Stats footer ---
-        footer = np.zeros((25, combined.shape[1], 3), dtype=np.uint8)
-        footer[:] = (30, 30, 30)
-        stats = f"HARD Dataset | T={current_time:.2f}s | Targets={num_targets} | FPS={target_fps}"
-        cv2.putText(footer, stats, (10, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-        
-        combined = np.vstack((combined, footer))
-        
-        # Display
-        cv2.imshow('Real-Time Hotspot Tracking', combined)
-        
-        if cv2.waitKey(int(1000/target_fps)) & 0xFF == ord('q'):
-            break
-    
-    cv2.destroyAllWindows()
-    
-    # Return predictions for analysis
-    return pd.DataFrame(predictions)
+    subset = df.loc[t_start:t_start + window_size]
+    return processor.process_window(subset)
 
 
-def analyze_predictions(predictions, ground_truth):
-    """Analyze prediction accuracy and plot comparison."""
-    from scipy.stats import pearsonr
-    import matplotlib.pyplot as plt
+def visualize_hotspot_detection(df, tracker, t_start, window_size=0.5, processor=None):
+    """Visualize hotspot detection on a single time window."""
+    power = compute_power_grid(df, t_start, window_size, processor)
+    hotspots, avg_center, velocity = tracker.track_and_predict(power)
     
-    print("\n" + "=" * 50)
-    print("ANALYSIS")
-    print("=" * 50)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     
-    # Use the smoothed ground truth that was stored during tracking
-    gt_vx = np.array(predictions['gt_vx'])
-    gt_vy = np.array(predictions['gt_vy'])
+    # Left: Power grid with hotspots
+    im1 = axes[0].imshow(power, cmap='hot', aspect='equal')
+    plt.colorbar(im1, ax=axes[0], label='RMS Power')
     
-    # Normalize ground truth to same scale (GT ranges ~-300 to +300)
-    gt_vx_norm = gt_vx / 300
-    gt_vy_norm = gt_vy / 300
+    # Mark hotspot centers
+    for spot in hotspots[:4]:
+        axes[0].scatter(spot['center_col'], spot['center_row'], 
+                       c='cyan', s=100, marker='x', linewidths=3)
     
-    # Calculate correlations
-    corr_vx, _ = pearsonr(predictions['vx'], gt_vx_norm)
-    corr_vy, _ = pearsonr(predictions['vy'], gt_vy_norm)
+    # Mark average center
+    if avg_center[0] is not None:
+        axes[0].scatter(avg_center[1], avg_center[0], 
+                       c='lime', s=200, marker='+', linewidths=4, label='Avg Center')
     
-    print(f"Velocity Correlation:")
-    print(f"  Vx: {corr_vx:.3f}")
-    print(f"  Vy: {corr_vy:.3f}")
-    print(f"  Combined: {(corr_vx + corr_vy) / 2:.3f}")
-    
-    # --- Plot comparison ---
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-    fig.suptitle('Predicted vs Ground Truth Velocity (Smoothed)', fontsize=14, fontweight='bold')
-    
-    time = predictions['time']
-    
-    # Vx plot
-    axes[0].plot(time, gt_vx_norm, 'r-', alpha=0.7, linewidth=1.5, label=f'Ground Truth Vx')
-    axes[0].plot(time, predictions['vx'], 'b-', alpha=0.7, linewidth=1.5, label=f'Predicted Vx')
-    axes[0].set_ylabel('Vx (normalized)')
+    axes[0].set_title(f'Hotspot Detection (t={t_start:.2f}s)')
+    axes[0].set_xlabel('Column')
+    axes[0].set_ylabel('Row')
     axes[0].legend(loc='upper right')
-    axes[0].grid(True, alpha=0.3)
-    axes[0].set_title(f'X Velocity - Correlation: {corr_vx:.3f}')
-    axes[0].axhline(0, color='gray', linestyle='--', alpha=0.5)
     
-    # Vy plot
-    axes[1].plot(time, gt_vy_norm, 'r-', alpha=0.7, linewidth=1.5, label=f'Ground Truth Vy')
-    axes[1].plot(time, predictions['vy'], 'b-', alpha=0.7, linewidth=1.5, label=f'Predicted Vy')
-    axes[1].set_ylabel('Vy (normalized)')
-    axes[1].set_xlabel('Time (s)')
-    axes[1].legend(loc='upper right')
-    axes[1].grid(True, alpha=0.3)
-    axes[1].set_title(f'Y Velocity - Correlation: {corr_vy:.3f}')
+    # Right: Velocity arrow
+    axes[1].set_xlim(-1.5, 1.5)
+    axes[1].set_ylim(-1.5, 1.5)
     axes[1].axhline(0, color='gray', linestyle='--', alpha=0.5)
+    axes[1].axvline(0, color='gray', linestyle='--', alpha=0.5)
+    
+    vx, vy = velocity
+    axes[1].arrow(0, 0, vx, vy, head_width=0.1, head_length=0.05, 
+                  fc='blue', ec='blue', linewidth=2)
+    axes[1].scatter([0], [0], c='black', s=100, zorder=5)
+    
+    axes[1].set_title(f'Predicted Velocity: vx={vx:.3f}, vy={vy:.3f}')
+    axes[1].set_xlabel('X Velocity')
+    axes[1].set_ylabel('Y Velocity')
+    axes[1].set_aspect('equal')
+    axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    return fig, hotspots, avg_center, velocity
+
+
+def track_hotspots_over_time(df, ground_truth, tracker, t_start=0, t_end=30, 
+                              window_size=0.2, step=0.1, processor=None):
+    """
+    Track hotspots over time and compare to ground truth.
     
-    return corr_vx, corr_vy
+    Args:
+        df: Neural data DataFrame
+        ground_truth: Ground truth DataFrame
+        tracker: HotspotTracker instance
+        t_start: Start time in seconds
+        t_end: End time in seconds
+        window_size: Processing window size in seconds
+        step: Time step between windows in seconds
+        processor: SignalProcessor instance (creates default if None)
+        
+    Returns:
+        DataFrame with predictions and ground truth
+    """
+    if processor is None:
+        processor = SignalProcessor()
+        
+    times = np.arange(t_start, t_end - window_size, step)
+    
+    results = {
+        'time': [], 'pred_vx': [], 'pred_vy': [],
+        'true_vx': [], 'true_vy': [],
+        'avg_row': [], 'avg_col': []
+    }
+    
+    for t in times:
+        power = compute_power_grid(df, t, window_size, processor)
+        hotspots, avg_center, velocity = tracker.track_and_predict(power)
+        
+        gt_idx = np.abs(ground_truth['time_s'].values - t).argmin()
+        
+        results['time'].append(t)
+        results['pred_vx'].append(velocity[0])
+        results['pred_vy'].append(velocity[1])
+        results['true_vx'].append(ground_truth['vx'].iloc[gt_idx])
+        results['true_vy'].append(ground_truth['vy'].iloc[gt_idx])
+        results['avg_row'].append(avg_center[0] if avg_center[0] else 16)
+        results['avg_col'].append(avg_center[1] if avg_center[1] else 16)
+    
+    return pd.DataFrame(results)
+
+
+def plot_tracking_comparison(tracking_results):
+    """Plot predicted vs ground truth velocity."""
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+    
+    # X velocity
+    axes[0].plot(tracking_results['time'], tracking_results['true_vx'], 
+                 label='Ground Truth Vx', alpha=0.7, linewidth=2)
+    axes[0].plot(tracking_results['time'], tracking_results['pred_vx'] * 80, 
+                 label='Predicted Vx (scaled)', alpha=0.7, linewidth=2)
+    axes[0].set_ylabel('X Velocity')
+    axes[0].set_title('Hotspot-Based Velocity Prediction vs Ground Truth')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # Y velocity
+    axes[1].plot(tracking_results['time'], tracking_results['true_vy'], 
+                 label='Ground Truth Vy', alpha=0.7, linewidth=2)
+    axes[1].plot(tracking_results['time'], tracking_results['pred_vy'] * 80, 
+                 label='Predicted Vy (scaled)', alpha=0.7, linewidth=2)
+    axes[1].set_xlabel('Time (s)')
+    axes[1].set_ylabel('Y Velocity')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Calculate correlation
+    corr_vx, _ = pearsonr(tracking_results['true_vx'], tracking_results['pred_vx'])
+    corr_vy, _ = pearsonr(tracking_results['true_vy'], tracking_results['pred_vy'])
+    
+    return fig, corr_vx, corr_vy
+
+
+def animate_hotspot_tracking(df, ground_truth, tracker, t_start=0, t_end=20, 
+                              window_size=0.5, fps=10, processor=None):
+    """
+    Animated visualization showing hotspot detection and cursor simulation.
+    
+    Args:
+        df: Neural data DataFrame
+        ground_truth: Ground truth DataFrame
+        tracker: HotspotTracker instance
+        t_start: Start time in seconds
+        t_end: End time in seconds
+        window_size: Processing window size in seconds
+        fps: Frames per second for animation
+        processor: SignalProcessor instance (creates default if None)
+    
+    Returns:
+        (figure, FuncAnimation) tuple
+    """
+    if processor is None:
+        processor = SignalProcessor()
+        
+    dt = 1 / fps
+    time_steps = np.arange(t_start, t_end - window_size, dt)
+    
+    # Pre-compute for consistent color scaling
+    print("  Pre-computing color scale...")
+    sample_grids = []
+    for t in np.linspace(t_start, t_end - window_size, 20):
+        sample_grids.append(compute_power_grid(df, t, window_size, processor))
+    global_max = np.max([g.max() for g in sample_grids]) * 1.2
+    
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    
+    # Initialize first frame
+    power = compute_power_grid(df, t_start, window_size, processor)
+    
+    # Left: Power grid
+    im = axes[0].imshow(power, cmap='hot', aspect='equal', vmin=0, vmax=global_max)
+    plt.colorbar(im, ax=axes[0], label='Power')
+    hotspot_scatter = axes[0].scatter([], [], c='cyan', s=100, marker='x', linewidths=2)
+    center_scatter = axes[0].scatter([], [], c='lime', s=200, marker='+', linewidths=3)
+    title0 = axes[0].set_title(f't={t_start:.2f}s')
+    axes[0].set_xlabel('Column')
+    axes[0].set_ylabel('Row')
+    
+    # Middle: Velocity arrows
+    axes[1].set_xlim(-1.5, 1.5)
+    axes[1].set_ylim(-1.5, 1.5)
+    axes[1].axhline(0, color='gray', linestyle='--', alpha=0.5)
+    axes[1].axvline(0, color='gray', linestyle='--', alpha=0.5)
+    axes[1].set_aspect('equal')
+    axes[1].set_xlabel('Vx')
+    axes[1].set_ylabel('Vy')
+    title1 = axes[1].set_title('Velocity')
+    pred_arrow = axes[1].quiver([0], [0], [0], [0], color='blue', scale=1, 
+                                 scale_units='xy', angles='xy', width=0.02)
+    
+    # Right: Cursor trajectory
+    axes[2].set_xlim(-100, 100)
+    axes[2].set_ylim(-100, 100)
+    axes[2].set_aspect('equal')
+    axes[2].grid(True, alpha=0.3)
+    axes[2].set_xlabel('X')
+    axes[2].set_ylabel('Y')
+    title2 = axes[2].set_title('Cursor')
+    
+    # Cursor state
+    cursor_state = {'x': 0, 'y': 0, 'history_x': [0], 'history_y': [0]}
+    cursor_trail, = axes[2].plot([], [], 'b-', alpha=0.5, linewidth=1)
+    cursor_dot = axes[2].scatter([0], [0], c='blue', s=100, zorder=5)
+    
+    def update(t):
+        power = compute_power_grid(df, t, window_size, processor)
+        hotspots, avg_center, pred_vel = tracker.track_and_predict(power)
+        
+        # Update power grid
+        im.set_array(power)
+        
+        # Update hotspot markers
+        if hotspots:
+            # spots = np.array([[h['center_col'], h['center_row']] for h in hotspots[:4]])
+            spots = np.array([[h['col'], h['row']] for h in hotspots[:4]])
+
+            hotspot_scatter.set_offsets(spots)
+        
+        if avg_center[0] is not None:
+            center_scatter.set_offsets([[avg_center[1], avg_center[0]]])
+        
+        # Update velocity arrow
+        pred_arrow.set_UVC([pred_vel[0]], [pred_vel[1]])
+        
+        # Update cursor position
+        cursor_state['x'] = np.clip(cursor_state['x'] + pred_vel[0] * 5, -100, 100)
+        cursor_state['y'] = np.clip(cursor_state['y'] + pred_vel[1] * 5, -100, 100)
+        cursor_state['history_x'].append(cursor_state['x'])
+        cursor_state['history_y'].append(cursor_state['y'])
+        
+        # Keep last 100 points
+        if len(cursor_state['history_x']) > 100:
+            cursor_state['history_x'] = cursor_state['history_x'][-100:]
+            cursor_state['history_y'] = cursor_state['history_y'][-100:]
+        
+        cursor_trail.set_data(cursor_state['history_x'], cursor_state['history_y'])
+        cursor_dot.set_offsets([[cursor_state['x'], cursor_state['y']]])
+        
+        # Update titles
+        title0.set_text(f'Neural Activity (t={t:.2f}s)')
+        title1.set_text(f'Vel: ({pred_vel[0]:.2f}, {pred_vel[1]:.2f})')
+        title2.set_text(f'Cursor: ({cursor_state["x"]:.1f}, {cursor_state["y"]:.1f})')
+        
+        return []
+    
+    anim = FuncAnimation(fig, update, frames=time_steps, interval=1000/fps, blit=False)
+    return fig, anim
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("BrainStorm Track 2 - Real-Time Hotspot Tracking")
+    print("BrainStorm Track 2 - Hotspot Tracking Algorithm")
     print("=" * 60)
-    print("\nPipeline: Raw → DSP Filter → UNet → Velocity (all in one loop)")
     
     # Load data
-    data, ground_truth = load_data("super_easy")
+    neural_data, ground_truth = load_data("medium")
     
-    # Run real-time tracking
-    predictions = run_realtime_tracking(
-        data, 
-        ground_truth,
-        model_path="scripts/compass_model.pth",
-        start_sec=0,
-        duration=30,
-        target_fps=30
+    # Initialize signal processor with full pipeline
+    print("\nInitializing signal processing pipeline:")
+    print("  1. Bandpass filter: 70-150 Hz (high-gamma band)")
+    print("  2. Envelope extraction: Hilbert transform")
+    print("  3. Temporal smoothing: 100ms sliding window")
+    print("  4. Spatial smoothing: Gaussian σ=1.0")
+    
+    processor = SignalProcessor(
+        fs=500,
+        lowcut=70,
+        highcut=150,
+        ema_alpha=0.1,
+        spatial_sigma=1.0,
+        envelope_method='hilbert'
     )
     
-    if predictions is not None:
-        # Analyze results
-        analyze_predictions(predictions, ground_truth)
+    # Initialize tracker
+    tracker = HotspotTracker(threshold_percentile=95, min_spot_size=3, smoothing_sigma=0)
+    # Note: spatial smoothing is now done in SignalProcessor, so set smoothing_sigma=0 in tracker
+    print("\nHotspotTracker initialized!")
     
-    print("\n✅ Done!")
+    # Test single frame detection
+    # print("\n[1/3] Testing hotspot detection at t=5s...")
+    # fig1, hotspots, center, vel = visualize_hotspot_detection(
+    #     neural_data, tracker, t_start=5.0, processor=processor
+    # )
+    # print(f"  Detected {len(hotspots)} hotspots")
+    # if center[0] is not None:
+    #     print(f"  Average center: row={center[0]:.1f}, col={center[1]:.1f}")
+    # print(f"  Predicted velocity: vx={vel[0]:.3f}, vy={vel[1]:.3f}")
+    # plt.show()
+    
+    # # Track over time
+    # print("\n[2/3] Tracking hotspots over 30 seconds...")
+    # tracking_results = track_hotspots_over_time(
+    #     neural_data, ground_truth, tracker, t_start=0, t_end=30, processor=processor
+    # )
+    # print(f"  Tracked {len(tracking_results)} time points")
+    
+    # Plot comparison
+    # fig2, corr_vx, corr_vy = plot_tracking_comparison(tracking_results)
+    # print(f"\n  Correlation with ground truth:")
+    # print(f"    Vx: {corr_vx:.3f}")
+    # print(f"    Vy: {corr_vy:.3f}")
+    # plt.show()
+    
+    # Animation
+    print("\n[3/3] Creating animated visualization...")
+    print("  Close the plot window when done viewing.")
+    fig3, anim = animate_hotspot_tracking(
+        neural_data, ground_truth, tracker, t_start=0, t_end=20, fps=10, processor=processor
+    )
+    plt.show()
+    
+    print("\nDone!")
