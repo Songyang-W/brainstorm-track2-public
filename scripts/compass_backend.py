@@ -3,7 +3,7 @@
 Compass Backend (Realtime Processor)
 
 Connects to the Track2 upstream stream, runs causal filtering + feature extraction,
-tracks the cross center (works when only 2-of-4 arms are active), and serves a
+tracks a stable tuned-region center (robust to missing arms + noise), and serves a
 browser-friendly WebSocket at a lower frame rate (~10-20 Hz).
 
 Run:
@@ -30,7 +30,7 @@ from rich.panel import Panel
 from scipy.ndimage import gaussian_filter
 from scipy.signal import butter, iirnotch, sosfilt, tf2sos
 
-from scripts.hotspot_tracker import ClusterTemplateTracker
+from scripts.hotspot_tracker import PersistentSpotClusterTracker, extract_peak_observations
 
 app = typer.Typer(help="Realtime processing backend for the OR 'Compass' UI")
 console = Console()
@@ -80,7 +80,7 @@ class CompassProcessor:
         fs: float,
         n_channels: int,
         grid_size: int,
-        ema_tau_s: float = 0.25,
+        ema_tau_s: float = 0.20,
         spatial_sigma: float = 1.0,
     ):
         self.fs = float(fs)
@@ -93,39 +93,25 @@ class CompassProcessor:
         self.ema = np.zeros((self.n_channels,), dtype=np.float32)
         self._last_t: float | None = None
 
-        self.cluster = ClusterTemplateTracker(
-            grid_size=self.grid_size,
-            search_radius=10,
-            shift_alpha=0.35,
-            template_half_life_s=18.0,
-            presence_half_life_s=60.0,
-            presence_gain=0.06,
-            update_percentile=92.0,
-            centroid_power=1.2,
-            min_update_pixels=16,
-            max_update_pixels=64,
-            roi_radius=13.0,
-            peak_suppress_radius=5,
-            frame_n_peaks=10,
-            peak_min_rel=0.55,
-            peak_abs_min=0.18,
-            update_blob_sigma=1.0,
-            update_min_rel=0.55,
-            update_dog_small_sigma=0.6,
-            update_dog_large_sigma=1.6,
-            update_dog_large_scale=0.65,
-            update_max_filter_size=5,
-            exclude_center_radius=2.2,
-            center_percentile=92.0,
-            center_min_rel=0.55,
-            min_update_conf=0.45,
-            presence_floor=0.02,
-            anchor_max=8,
-            anchor_percentile=99.0,
-            anchor_min_rel=0.85,
-            anchor_min_size=14,
-            anchor_keep_rel=0.82,
+        # Peak-cluster tracker with explicit memory (interpretable, noise-robust).
+        self.tracker = PersistentSpotClusterTracker(
+            max_tracks=6,
+            ema_alpha=0.35,
+            max_match_dist=6.0,
+            strength_gain=0.3,
+            strength_decay=0.98,
+            max_age=200,
         )
+        self.peak_n = 3
+        self.peak_smooth_sigma = 1.0
+        self.peak_suppress_radius = 6
+        self.peak_com_radius = 2
+        self.memory_map: np.ndarray | None = None
+        self.memory_half_life_s = 45.0
+        self.center_alpha = 0.45
+        self.center_ema: np.ndarray | None = None
+        self.conf_alpha = 0.35
+        self.conf_ema: float | None = None
 
     def process_batch(self, batch: np.ndarray, t_s: float) -> dict[str, Any] | None:
         if batch.size == 0:
@@ -160,42 +146,100 @@ class CompassProcessor:
         grid = _reshape_to_grid(z, self.grid_size)
         grid = gaussian_filter(grid, sigma=self.spatial_sigma)
 
-        cr, cc, memory = self.cluster.update(grid, dt_s=dt)
+        observations = extract_peak_observations(
+            grid,
+            n_peaks=self.peak_n,
+            smooth_sigma=self.peak_smooth_sigma,
+            suppress_radius=self.peak_suppress_radius,
+            com_radius=self.peak_com_radius,
+        )
+        cr, cc, _tracks = self.tracker.update(observations)
         if cr is None or cc is None:
             return None
 
+        center_obs = np.array([float(cr), float(cc)], dtype=float)
+        if self.center_ema is None:
+            self.center_ema = center_obs.copy()
+        else:
+            self.center_ema = (1.0 - self.center_alpha) * self.center_ema + self.center_alpha * center_obs
+        smooth_cr, smooth_cc = float(self.center_ema[0]), float(self.center_ema[1])
+
+        spots = observations
+        track_states = self.tracker.track_states()
+        spots_mem = [(r, c, s) for (r, c, s, _age) in track_states]
+
+        # Confidence from how many stable tracks we have + their strengths.
+        strengths = sorted([s for (_r, _c, s, _age) in track_states], reverse=True)
+        if strengths:
+            strength_conf = float(np.mean(strengths[:2]))
+            count_conf = min(1.0, len(strengths) / 2.0)
+            conf = float(np.clip(0.7 * strength_conf + 0.3 * count_conf, 0.0, 1.0))
+        else:
+            conf = 0.0
+        if self.conf_ema is None:
+            self.conf_ema = conf
+        else:
+            self.conf_ema = (1.0 - self.conf_alpha) * self.conf_ema + self.conf_alpha * conf
+        conf = float(self.conf_ema)
+
+        if self.memory_map is None:
+            self.memory_map = np.zeros((self.grid_size, self.grid_size), dtype=float)
+        decay = 0.5 ** (dt / max(1e-3, self.memory_half_life_s))
+        self.memory_map *= decay
+        if track_states:
+            upd = np.zeros_like(self.memory_map)
+            for r, c, s, _age in track_states:
+                rr = int(round(float(r)))
+                cc = int(round(float(c)))
+                if 0 <= rr < self.grid_size and 0 <= cc < self.grid_size:
+                    upd[rr, cc] = max(float(upd[rr, cc]), float(s))
+            if float(upd.max()) > 0:
+                upd = gaussian_filter(upd, sigma=1.0)
+                mx = float(upd.max())
+                if mx > 0:
+                    upd = upd / mx
+                self.memory_map = np.maximum(self.memory_map, upd)
+
         mid = (self.grid_size - 1) / 2.0
-        delta_r = float(cr - mid)
-        delta_c = float(cc - mid)
+        # Use smoothed center for UI display
+        delta_r = float(smooth_cr - mid)
+        delta_c = float(smooth_cc - mid)
         move_r = float(-delta_r / mid)
         move_c = float(-delta_c / mid)
         dist = float(np.hypot(delta_r, delta_c))
 
-        mem = memory
-        spots = self.cluster.top_spots_live(n_peaks=8)
-        spots_mem = self.cluster.top_spots_memory(n_peaks=8)
+        mem = self.memory_map
+
+        regions = {}
+        track_states_sorted = sorted(track_states, key=lambda x: float(x[2]), reverse=True)
+        for idx, (r, c, s, _age) in enumerate(track_states_sorted[:4], start=1):
+            regions[f"anchor_{idx}"] = (float(r), float(c), float(s))
 
         return {
             "t_s": float(t_s),
-            "center_row": float(cr),
-            "center_col": float(cc),
-            "confidence": float(self.cluster.last_confidence or 0.0),
+            "center_row": float(smooth_cr),
+            "center_col": float(smooth_cc),
+            "confidence": float(conf),
             "distance": dist,
             "move_row": move_r,
             "move_col": move_c,
-            "spots": [[float(r), float(c), float(v)] for (r, c, v) in spots],
-            "spots_mem": [[float(r), float(c), float(v)] for (r, c, v) in spots_mem],
+            "spots": [[float(r), float(c), float(v)] for (r, c, v) in (spots or [])],
+            "spots_mem": [[float(r), float(c), float(v)] for (r, c, v) in (spots_mem or [])],
+            "regions": {k: [float(v[0]), float(v[1]), float(v[2])] for (k, v) in regions.items()},
             # JSON-friendly payload (32x32 is small enough for local UI at ~15 Hz).
             "heatmap": grid.astype(np.float32).tolist(),
             "memory": None if mem is None else mem.astype(np.float32).tolist(),
         }
 
     def reset(self) -> None:
-        """Reset all causal state (filters, EMA, and cluster memory)."""
+        """Reset all causal state (filters, EMA, and tracker memory)."""
         self.fb = _make_filterbank(self.fs, self.n_channels)
         self.ema[:] = 0.0
         self._last_t = None
-        self.cluster.reset()
+        self.tracker.reset()
+        self.center_ema = None
+        self.conf_ema = None
+        self.memory_map = None
 
 
 class CompassServer:
@@ -328,7 +372,7 @@ def main(
         True, "--heatmaps/--no-heatmaps", help="Send heatmap + memory arrays"
     ),
     ema_tau_s: float = typer.Option(
-        0.35, help="Temporal smoothing (EMA time constant, seconds)"
+        0.20, help="Temporal smoothing (EMA time constant, seconds)"
     ),
     spatial_sigma: float = typer.Option(
         1.0, help="Spatial Gaussian smoothing sigma (grid units)"

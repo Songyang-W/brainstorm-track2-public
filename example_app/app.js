@@ -1,280 +1,296 @@
 /**
- * Compass | OR Guidance UI
- * Consumes ws frames from scripts/compass_backend.py (brainstorm-compass).
+ * Array Placement Guide - Simplified Surgeon UI
+ * ONE JOB: Tell the surgeon which way to move
  */
+
+// ============================================
+// State
+// ============================================
 
 let ws = null;
 let isConnected = false;
 let gridSize = 32;
 
-// DOM
-const el = {};
-
-// Canvases
-let heatCanvas, heatCtx, heatOff, heatOffCtx;
+// Heatmap state (for debug view)
+let liveCanvas, liveCtx, liveOff, liveOffCtx;
 let memCanvas, memCtx, memOff, memOffCtx;
-
-// Running normalization to reduce flicker.
-let heatMax = 1.0;
+let liveMax = 1.0;
 let memMax = 1.0;
+
+// DOM elements
+const dom = {};
+
+// ============================================
+// Utilities
+// ============================================
 
 function $(id) {
   return document.getElementById(id);
 }
 
-function clamp(v, a, b) {
-  return Math.max(a, Math.min(b, v));
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
 }
 
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-function setStatus(mode) {
-  const chip = el.stateChip;
-  chip.classList.remove("connected", "connecting", "acquiring", "locked");
+// ============================================
+// Direction Text
+// ============================================
 
-  const dot = el.statusIndicator;
-  dot.style.opacity = "1";
+function getDirectionText(moveRow, moveCol) {
+  const r = moveRow || 0;
+  const c = moveCol || 0;
+  const mag = Math.hypot(r, c);
 
-  if (mode === "connected") {
-    chip.classList.add("connected");
-    el.statusText.textContent = "CONNECTED";
-    el.connectBtn.textContent = "Disconnect";
+  if (mag < 0.08) return "HOLD";
+
+  // Determine direction
+  const up = r < -0.1;
+  const down = r > 0.1;
+  const left = c < -0.1;
+  const right = c > 0.1;
+
+  if (up && left) return "UP LEFT";
+  if (up && right) return "UP RIGHT";
+  if (down && left) return "DOWN LEFT";
+  if (down && right) return "DOWN RIGHT";
+  if (up) return "UP";
+  if (down) return "DOWN";
+  if (left) return "LEFT";
+  if (right) return "RIGHT";
+
+  return "ADJUST";
+}
+
+// ============================================
+// App State Management
+// ============================================
+
+function setAppState(state) {
+  const app = dom.app;
+  app.classList.remove("connected", "connecting", "acquiring", "on-target", "show-debug");
+
+  if (state.connected) app.classList.add("connected");
+  if (state.connecting) app.classList.add("connecting");
+  if (state.acquiring) app.classList.add("acquiring");
+  if (state.onTarget) app.classList.add("on-target");
+  if (state.showDebug) app.classList.add("show-debug");
+}
+
+function setConnectionStatus(status) {
+  if (status === "connected") {
+    dom.statusText.textContent = "Connected";
+    dom.connectBtn.textContent = "Disconnect";
     isConnected = true;
-  } else if (mode === "connecting") {
-    chip.classList.add("connecting");
-    el.statusText.textContent = "CONNECTING";
-    el.connectBtn.textContent = "Connect";
+    setAppState({ connected: true, showDebug: dom.showDebug.checked });
+  } else if (status === "connecting") {
+    dom.statusText.textContent = "Connecting...";
+    dom.connectBtn.textContent = "Cancel";
     isConnected = false;
+    setAppState({ connecting: true, showDebug: dom.showDebug.checked });
   } else {
-    chip.classList.add("acquiring");
-    el.statusText.textContent = "DISCONNECTED";
-    el.connectBtn.textContent = "Connect";
+    dom.statusText.textContent = "Disconnected";
+    dom.connectBtn.textContent = "Connect";
     isConnected = false;
+    setAppState({ showDebug: dom.showDebug.checked });
   }
 }
 
-function setMode(kind) {
-  // kind: acquiring | tracking | locked
-  el.dialWrap.classList.toggle("locked", kind === "locked");
-  el.lock.classList.toggle("on", kind === "locked");
+// ============================================
+// Arrow Rendering
+// ============================================
 
-  if (kind === "locked") {
-    el.stateChip.classList.add("locked");
-  } else {
-    el.stateChip.classList.remove("locked");
+function updateArrow(moveRow, moveCol, onTarget) {
+  const dx = clamp(moveCol || 0, -1, 1);
+  const dy = clamp(moveRow || 0, -1, 1);
+  const mag = Math.min(1, Math.hypot(dx, dy));
+
+  const cx = 100, cy = 100;
+  const maxLen = 65;
+  const headSize = 15;
+
+  if (onTarget || mag < 0.05) {
+    dom.arrowShaft.setAttribute("x2", cx);
+    dom.arrowShaft.setAttribute("y2", cy);
+    dom.arrowHead.setAttribute("points", "100,100 100,100 100,100");
+    return;
   }
+
+  // Calculate direction
+  const normDx = dx / (mag || 1);
+  const normDy = dy / (mag || 1);
+  const len = maxLen * Math.min(1, mag * 1.5);
+
+  const x2 = cx + normDx * len;
+  const y2 = cy + normDy * len;
+
+  dom.arrowShaft.setAttribute("x2", x2.toFixed(1));
+  dom.arrowShaft.setAttribute("y2", y2.toFixed(1));
+
+  // Arrowhead
+  const angle = Math.atan2(normDy, normDx);
+  const ha = Math.PI / 5;
+
+  const tipX = x2 + normDx * headSize;
+  const tipY = y2 + normDy * headSize;
+  const lX = x2 - headSize * 0.6 * Math.cos(angle - ha);
+  const lY = y2 - headSize * 0.6 * Math.sin(angle - ha);
+  const rX = x2 - headSize * 0.6 * Math.cos(angle + ha);
+  const rY = y2 - headSize * 0.6 * Math.sin(angle + ha);
+
+  dom.arrowHead.setAttribute("points", `${tipX},${tipY} ${lX},${lY} ${rX},${rY}`);
 }
 
-// Color ramp tuned for OR: deep black -> amber -> surgical green.
-function colorRamp(t) {
+// ============================================
+// Distance Bar
+// ============================================
+
+function updateDistanceBar(distance, maxDist = 15) {
+  // Distance of 0 = on target (right side), high distance = far (left side)
+  const pct = clamp(1 - (distance / maxDist), 0, 1) * 100;
+  dom.distanceMarker.style.left = `${pct}%`;
+}
+
+// ============================================
+// Heatmap Rendering (Debug View)
+// ============================================
+
+function heatmapColor(t) {
   const x = clamp(t, 0, 1);
-  const r0 = 6, g0 = 7, b0 = 10;      // floor
-  const r1 = 243, g1 = 180, b1 = 75;  // amber
-  const r2 = 57, g2 = 246, b2 = 193;  // green
+  const colors = [
+    [20, 30, 48],
+    [30, 80, 100],
+    [80, 160, 140],
+    [220, 180, 80],
+    [255, 250, 240],
+  ];
 
-  // Contrast curve (brings out structure without blasting the background)
-  const y = Math.pow(x, 0.72);
-  const mid = 0.56;
-  let r, g, b;
-  if (y < mid) {
-    const tt = y / mid;
-    r = lerp(r0, r1, tt);
-    g = lerp(g0, g1, tt);
-    b = lerp(b0, b1, tt);
-  } else {
-    const tt = (y - mid) / (1 - mid);
-    r = lerp(r1, r2, tt);
-    g = lerp(g1, g2, tt);
-    b = lerp(b1, b2, tt);
-  }
-  return [r | 0, g | 0, b | 0];
+  const n = colors.length - 1;
+  const idx = x * n;
+  const i = Math.min(Math.floor(idx), n - 1);
+  const frac = idx - i;
+
+  return [
+    Math.round(lerp(colors[i][0], colors[i + 1][0], frac)),
+    Math.round(lerp(colors[i][1], colors[i + 1][1], frac)),
+    Math.round(lerp(colors[i][2], colors[i + 1][2], frac)),
+  ];
 }
 
-function drawHeatmap(ctx, offCtx, offCanvas, arr2d, maxRef, overlays) {
-  if (!arr2d) return maxRef;
+function drawHeatmap(ctx, offCtx, offCanvas, arr2d, maxRef) {
+  if (!arr2d || !arr2d.length) return maxRef;
+
   const h = arr2d.length;
   const w = arr2d[0].length;
 
-  // Frame max + smoothing for stability.
-  let frameMax = 0.0;
+  let frameMax = 0;
   for (let r = 0; r < h; r++) {
-    const row = arr2d[r];
-    for (let c = 0; c < w; c++) frameMax = Math.max(frameMax, row[c]);
+    for (let c = 0; c < w; c++) {
+      frameMax = Math.max(frameMax, arr2d[r][c]);
+    }
   }
   const targetMax = Math.max(1e-6, frameMax);
-  maxRef = Math.max(targetMax, maxRef * 0.987);
+  maxRef = Math.max(targetMax, maxRef * 0.99);
 
   const img = offCtx.createImageData(w, h);
   const d = img.data;
+
   for (let r = 0; r < h; r++) {
-    const row = arr2d[r];
     for (let c = 0; c < w; c++) {
-      const v = row[c] / maxRef;
-      const [rr, gg, bb] = colorRamp(v);
+      const v = arr2d[r][c] / maxRef;
+      const [rr, gg, bb] = heatmapColor(v);
       const i = (r * w + c) * 4;
-      d[i + 0] = rr;
+      d[i] = rr;
       d[i + 1] = gg;
       d[i + 2] = bb;
       d[i + 3] = 255;
     }
   }
-
   offCtx.putImageData(img, 0, 0);
+
   ctx.save();
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   ctx.drawImage(offCanvas, 0, 0, ctx.canvas.width, ctx.canvas.height);
   ctx.restore();
 
-  const sx = ctx.canvas.width / w;
-  const sy = ctx.canvas.height / h;
-
-  // Subtle grid for orientation (every 4 cells)
-  ctx.save();
-  ctx.strokeStyle = "rgba(245,246,247,0.07)";
-  ctx.lineWidth = 1;
-  for (let k = 0; k <= w; k += 4) {
-    ctx.beginPath();
-    ctx.moveTo(k * sx, 0);
-    ctx.lineTo(k * sx, ctx.canvas.height);
-    ctx.stroke();
-  }
-  for (let k = 0; k <= h; k += 4) {
-    ctx.beginPath();
-    ctx.moveTo(0, k * sy);
-    ctx.lineTo(ctx.canvas.width, k * sy);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  if (overlays && overlays.center) {
-    const { row, col } = overlays.center;
-    ctx.save();
-    ctx.translate((col + 0.5) * sx, (row + 0.5) * sy);
-    ctx.strokeStyle = "rgba(122,166,255,0.92)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(0, 0, 10, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(-14, 0);
-    ctx.lineTo(14, 0);
-    ctx.moveTo(0, -14);
-    ctx.lineTo(0, 14);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (overlays && overlays.anchors && overlays.anchors.length) {
-    const anchors = overlays.anchors;
-    let maxW = 0;
-    for (const a of anchors) maxW = Math.max(maxW, a.w || 0);
-    maxW = Math.max(1e-6, maxW);
-
-    ctx.save();
-    ctx.lineWidth = 2;
-    for (const a of anchors) {
-      const rel = clamp((a.w || 0) / maxW, 0, 1);
-      const rad = clamp(4 + rel * 7, 4, 11);
-      ctx.strokeStyle = `rgba(57,246,193,${0.35 + rel * 0.45})`;
-      ctx.fillStyle = `rgba(57,246,193,${0.08 + rel * 0.10})`;
-      ctx.beginPath();
-      ctx.arc((a.col + 0.5) * sx, (a.row + 0.5) * sy, rad, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
   return maxRef;
 }
 
-function parse2D(frameArr) {
-  return frameArr || null;
-}
-
-function vectorText(moveRow, moveCol) {
-  const r = moveRow || 0.0;
-  const c = moveCol || 0.0;
-
-  const mag = Math.hypot(r, c);
-  if (mag < 0.08) return "HOLD";
-
-  const vert = r < -0.15 ? "UP" : r > 0.15 ? "DOWN" : null;
-  const horz = c < -0.15 ? "LEFT" : c > 0.15 ? "RIGHT" : null;
-  if (vert && horz) return `MOVE ${vert} ${horz}`;
-  if (vert) return `MOVE ${vert}`;
-  if (horz) return `MOVE ${horz}`;
-  return "ADJUST";
-}
+// ============================================
+// Main UI Update
+// ============================================
 
 function updateUI(frame) {
-  const t = frame.t_s ?? 0.0;
-  const conf = clamp(frame.confidence ?? 0.0, 0, 1);
-  const dist = frame.distance ?? null;
+  const t = frame.t_s ?? 0;
+  const conf = clamp(frame.confidence ?? 0, 0, 1);
+  const dist = frame.distance ?? 10;
+  const mvR = frame.move_row ?? 0;
+  const mvC = frame.move_col ?? 0;
 
-  el.timeDisplay.textContent = `${t.toFixed(2)}s`;
-  el.confidenceDisplay.textContent = `${Math.round(conf * 100)}%`;
-  el.distanceDisplay.textContent = dist === null || dist === undefined ? "--" : `${dist.toFixed(1)} grid`;
+  // Determine state
+  const onTarget = dist < 1.5 && conf > 0.65;
+  const acquiring = conf < 0.35;
 
-  const mvR = frame.move_row ?? 0.0;
-  const mvC = frame.move_col ?? 0.0;
-  const angle = Math.atan2(mvR, mvC) * (180 / Math.PI);
-  el.needle.style.setProperty("--angle", `${angle}deg`);
+  // Update time
+  dom.timeDisplay.textContent = `${t.toFixed(1)}s`;
 
-  const moveText = vectorText(mvR, mvC);
-  el.moveText.textContent = moveText;
+  // Update app state
+  setAppState({
+    connected: isConnected,
+    acquiring: acquiring && !onTarget,
+    onTarget: onTarget,
+    showDebug: dom.showDebug.checked,
+  });
 
-  const locked = (dist !== null && dist < 1.35 && conf > 0.78);
-  setMode(locked ? "locked" : conf < 0.35 ? "acquiring" : "tracking");
-
-  // More explicit operator-facing readouts
-  const mid = (gridSize - 1) / 2.0;
-  const dRow = (frame.center_row ?? mid) - mid;
-  const dCol = (frame.center_col ?? mid) - mid;
-  el.offsetDisplay.textContent = `${dRow.toFixed(1)}, ${dCol.toFixed(1)}`;
-
-  const qual = conf > 0.78 ? "HIGH" : conf > 0.5 ? "OK" : conf > 0.35 ? "LOW" : "ACQ";
-  el.qualityDisplay.textContent = qual;
-
-  // Heatmaps
-  const heat2d = parse2D(frame.heatmap);
-  const mem2d = parse2D(frame.memory);
-
-  const anchorsLive = Array.isArray(frame.spots) ? frame.spots : [];
-  const anchorsMem = Array.isArray(frame.spots_mem) ? frame.spots_mem : [];
-
-  const live = anchorsLive.slice(0, 8).map((p) => ({ row: p[0], col: p[1], w: p[2] }));
-  const mem = anchorsMem.slice(0, 8).map((p) => ({ row: p[0], col: p[1], w: p[2] }));
-
-  if (heat2d) {
-    heatMax = drawHeatmap(
-      heatCtx,
-      heatOffCtx,
-      heatOff,
-      heat2d,
-      heatMax,
-      { center: { row: frame.center_row, col: frame.center_col }, anchors: live }
-    );
+  // Update instruction text
+  if (onTarget) {
+    dom.instructionText.textContent = "ON TARGET";
+    dom.instructionDetail.textContent = "Hold position";
+  } else if (acquiring) {
+    dom.instructionText.textContent = "ACQUIRING";
+    dom.instructionDetail.textContent = "Move slowly";
+  } else {
+    const dir = getDirectionText(mvR, mvC);
+    dom.instructionText.textContent = dir;
+    dom.instructionDetail.textContent = `Distance: ${dist.toFixed(1)} units`;
   }
 
-  if (mem2d) {
-    const midPt = (gridSize - 1) / 2.0;
-    memMax = drawHeatmap(
-      memCtx,
-      memOffCtx,
-      memOff,
-      mem2d,
-      memMax,
-      { center: { row: midPt, col: midPt }, anchors: mem }
-    );
+  // Update arrow
+  updateArrow(mvR, mvC, onTarget);
+
+  // Update distance bar
+  updateDistanceBar(dist);
+
+  // Update debug view if visible
+  if (dom.showDebug.checked) {
+    dom.debugCenter.textContent = `${(frame.center_row ?? 0).toFixed(1)}, ${(frame.center_col ?? 0).toFixed(1)}`;
+    dom.debugConfidence.textContent = `${Math.round(conf * 100)}%`;
+    dom.debugDistance.textContent = dist.toFixed(2);
+
+    const regions = frame.regions || {};
+    const regionCount = Object.keys(regions).length;
+    dom.debugRegions.textContent = `${regionCount} active`;
+
+    // Draw heatmaps
+    if (frame.heatmap) {
+      liveMax = drawHeatmap(liveCtx, liveOffCtx, liveOff, frame.heatmap, liveMax);
+    }
+    if (frame.memory) {
+      memMax = drawHeatmap(memCtx, memOffCtx, memOff, frame.memory, memMax);
+    }
   }
 }
 
+// ============================================
+// WebSocket
+// ============================================
+
 function connect() {
-  const url = el.serverUrl.value.trim();
+  const url = dom.wsInput.value.trim();
   if (!url) return;
 
   if (isConnected && ws) {
@@ -282,13 +298,13 @@ function connect() {
     return;
   }
 
-  setStatus("connecting");
+  setConnectionStatus("connecting");
 
   try {
     ws = new WebSocket(url);
 
     ws.onopen = () => {
-      setStatus("connected");
+      setConnectionStatus("connected");
     };
 
     ws.onmessage = (event) => {
@@ -301,6 +317,10 @@ function connect() {
 
       if (data.type === "init") {
         gridSize = data.grid_size ?? 32;
+        liveOff.width = gridSize;
+        liveOff.height = gridSize;
+        memOff.width = gridSize;
+        memOff.height = gridSize;
       }
 
       if (data.type === "compass_frame") {
@@ -309,83 +329,125 @@ function connect() {
     };
 
     ws.onerror = () => {
-      setStatus("disconnected");
+      setConnectionStatus("disconnected");
     };
 
     ws.onclose = () => {
       ws = null;
-      setStatus("disconnected");
-      setMode("acquiring");
+      setConnectionStatus("disconnected");
     };
-  } catch {
-    setStatus("disconnected");
+
+  } catch (e) {
+    console.error("Connection error:", e);
+    setConnectionStatus("disconnected");
   }
 }
 
+// ============================================
+// Reset
+// ============================================
+
 function reset() {
-  heatMax = 1.0;
+  liveMax = 1.0;
   memMax = 1.0;
-  heatCtx.clearRect(0, 0, heatCanvas.width, heatCanvas.height);
-  memCtx.clearRect(0, 0, memCanvas.width, memCanvas.height);
 
-  el.moveText.textContent = "ACQUIRING…";
-  el.offsetDisplay.textContent = "—";
-  el.qualityDisplay.textContent = "—";
-  setMode("acquiring");
+  if (liveCtx) liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+  if (memCtx) memCtx.clearRect(0, 0, memCanvas.width, memCanvas.height);
 
-  // Ask backend to clear tracking memory.
+  dom.instructionText.textContent = isConnected ? "ACQUIRING" : "CONNECT";
+  dom.instructionDetail.textContent = isConnected ? "Move slowly" : "Press Connect below";
+
+  updateArrow(0, 0, false);
+  updateDistanceBar(10);
+
+  setAppState({
+    connected: isConnected,
+    acquiring: isConnected,
+    showDebug: dom.showDebug.checked,
+  });
+
   try {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "reset" }));
     }
   } catch {
-    // Ignore.
+    // ignore
   }
 }
 
+// ============================================
+// Init
+// ============================================
+
 function init() {
-  el.stateChip = $("state-chip");
-  el.statusIndicator = $("status-indicator");
-  el.statusText = $("status-text");
-  el.timeDisplay = $("time-display");
-  el.confidenceDisplay = $("confidence-display");
-  el.distanceDisplay = $("distance-display");
-  el.connectBtn = $("connect-btn");
-  el.resetBtn = $("reset-btn");
-  el.serverUrl = $("server-url");
+  // Cache DOM elements
+  dom.app = $("app");
+  dom.statusDot = $("status-dot");
+  dom.statusText = $("status-text");
+  dom.timeDisplay = $("time-display");
 
-  el.dialWrap = $("dial-wrap");
-  el.needle = $("needle");
-  el.lock = $("lock");
-  el.moveText = $("move-text");
-  el.offsetDisplay = $("offset-display");
-  el.qualityDisplay = $("quality-display");
+  dom.instructionText = $("instruction-text");
+  dom.instructionDetail = $("instruction-detail");
 
-  heatCanvas = $("heatmap-canvas");
-  memCanvas = $("memory-canvas");
-  heatCtx = heatCanvas.getContext("2d");
+  dom.arrowShaft = $("arrow-shaft");
+  dom.arrowHead = $("arrow-head");
+
+  dom.distanceFill = $("distance-fill");
+  dom.distanceMarker = $("distance-marker");
+
+  dom.controlsPanel = $("controls-panel");
+  dom.controlsToggle = $("controls-toggle");
+  dom.wsInput = $("ws-input");
+  dom.connectBtn = $("connect-btn");
+  dom.resetBtn = $("reset-btn");
+  dom.showDebug = $("show-debug");
+
+  dom.debugCenter = $("debug-center");
+  dom.debugConfidence = $("debug-confidence");
+  dom.debugDistance = $("debug-distance");
+  dom.debugRegions = $("debug-regions");
+
+  // Setup canvases
+  liveCanvas = $("heatmap-live");
+  memCanvas = $("heatmap-memory");
+  liveCtx = liveCanvas.getContext("2d");
   memCtx = memCanvas.getContext("2d");
 
-  // Offscreen buffers to avoid recreating canvases every frame.
-  heatOff = document.createElement("canvas");
+  liveOff = document.createElement("canvas");
   memOff = document.createElement("canvas");
-  heatOff.width = gridSize;
-  heatOff.height = gridSize;
+  liveOff.width = gridSize;
+  liveOff.height = gridSize;
   memOff.width = gridSize;
   memOff.height = gridSize;
-  heatOffCtx = heatOff.getContext("2d");
+  liveOffCtx = liveOff.getContext("2d");
   memOffCtx = memOff.getContext("2d");
 
-  setStatus("disconnected");
-  setMode("acquiring");
+  // Initial state
+  setConnectionStatus("disconnected");
   reset();
 
-  el.connectBtn.addEventListener("click", connect);
-  el.resetBtn.addEventListener("click", reset);
-  el.serverUrl.addEventListener("keypress", (e) => {
+  // Event listeners
+  dom.connectBtn.addEventListener("click", connect);
+  dom.resetBtn.addEventListener("click", reset);
+  dom.wsInput.addEventListener("keypress", (e) => {
     if (e.key === "Enter") connect();
   });
+
+  // Controls toggle
+  dom.controlsToggle.addEventListener("click", () => {
+    dom.controlsPanel.classList.toggle("expanded");
+  });
+
+  // Debug toggle
+  dom.showDebug.addEventListener("change", () => {
+    setAppState({
+      connected: isConnected,
+      showDebug: dom.showDebug.checked,
+    });
+  });
+
+  // Start with controls expanded
+  dom.controlsPanel.classList.add("expanded");
 }
 
 document.addEventListener("DOMContentLoaded", init);
-

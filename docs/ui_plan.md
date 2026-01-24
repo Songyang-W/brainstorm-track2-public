@@ -1,112 +1,182 @@
-# OR UI Plan: "Compass HUD"
+# Array Placement Guide - UI Specification
 
-This plan targets the Clinical Operator persona in `docs/user_persona.md` and the OR constraints in `docs/overview.md`:
-- glanceable from ~6 feet
-- minimal cognitive load
-- unambiguous "move this way" + "found it" signal
-- robust to noisy, direction-dependent activations (`docs/data.md`)
+This document describes the UI design for the intraoperative array placement guidance tool, targeting the Clinical Operator persona defined in `docs/user_persona.md`.
 
-## Core Mental Model
+## Design Principles
 
-The tuned region appears as a cluster of direction-dependent sub-regions that only partially light up at any moment. The UI should:
-1. Estimate the *stable cluster center* (the placement target) from streaming neural data.
-2. Show a single dominant guidance vector: where to move the array to center the cluster.
-3. Communicate certainty and signal quality.
+1. **Light clinical theme** - Bright, neutral background suitable for OR lighting conditions
+2. **6-foot readability** - Large typography, high contrast, simple shapes
+3. **Instruction-first** - Primary job is telling the surgeon what to do NOW
+4. **Zero-training** - Instantly understandable interface
+5. **Stable** - No frantic animations; motion only for state transitions
 
-## Screen Layout (Single Screen, No Tabs)
+## Visual Design
 
-### A) Primary Guidance (Center Stage)
-- **Big Compass Arrow**: points in the direction the surgeon should move the array.
-- **Distance Ring**: radial meter showing how far the estimated center is from the array midpoint.
-- **ON TARGET State**: when "close enough" and confidence is high, replace arrow with a large "ON TARGET" badge + steady green ring.
+### Color Palette
+- Background: Light gray (#f5f6f8)
+- Surface: White (#ffffff)
+- Primary accent: Blue (#2563eb) for guidance elements
+- Success: Green (#059669) for on-target state
+- Warning: Amber (#d97706) for acquiring/uncertain states
+- Error: Red (#dc2626) for disconnected/fault states
 
-### B) Context (Secondary, Still Glanceable)
-- **Live Heatmap (32x32)**: current high-gamma power map, with center marker and peak overlays.
-- **Memory Heatmap**: persistence view that accumulates cluster parts over time (shows the stable shape, including parts that are currently off).
+### Typography
+- Primary: Atkinson Hyperlegible (chosen for maximum legibility at distance)
+- Monospace: IBM Plex Mono (for numeric values)
+- Instruction text: 36-64px bold (responsive)
+- Secondary labels: 11-13px uppercase
 
-### C) Operator Status Strip (Top/Bottom Bar)
-- Connection state (Connected / Buffering / Disconnected)
-- Timestamp / latency
-- Confidence meter (0-100) with clear thresholds
-- Signal-quality flags:
-  - "Too Noisy" / "Dead Channels" (if detected)
-  - "Low Confidence" (if template score collapses)
+## Screen Layout
 
-## Interaction Model
+### Header (Status Bar)
+- Logo and application title ("Array Placement")
+- Connection status chip with indicator dot
+- Time display
 
-No UI controls during active use beyond:
-- Server URL field (setup only)
-- "Connect" button
-- "Reset" button (clears accumulation and re-centers tracking)
-  - Implementation detail: sends `{"type":"reset"}` to the backend when connected.
+### Main Content Area
 
-Everything else is read-only and big.
+#### Primary: Instruction Panel (Full Width)
+The dominant UI element - a large text panel showing one of:
+- **CONNECT TO BEGIN** - Disconnected state
+- **ACQUIRING SIGNAL** - Low confidence, building signal
+- **MOVE [direction]** - Active guidance (e.g., "MOVE UP LEFT")
+- **ON TARGET** - Array is centered on the tuned region
 
-## States & Visual Language
+The panel background changes color to reinforce state:
+- Default: White
+- Acquiring: Light amber (#fef3c7)
+- On Target: Light green (#d1fae5)
 
-### 1) Searching
-- Arrow becomes a subtle rotating sweep (like sonar) with text: "SEARCHING"
-- Confidence bar muted / gray
-- Heatmaps still visible but de-emphasized
+#### Secondary: Guidance Pad
+A circular visualization showing the direction and magnitude of required movement:
+- Central dot represents current position
+- Arrow points in direction to move
+- Target ring indicates the "on-target" zone
+- Cardinal labels (UP/DOWN/LEFT/RIGHT) for orientation
 
-Trigger: confidence < threshold for N frames OR no stable estimate.
+When on-target:
+- Arrow hides
+- Target ring turns solid green
 
-### 2) Tracking
-- Arrow is stable and decisive
-- Ring shows distance with a single numeric readout (e.g. "3.2 mm eq")
-- Confidence meter visible and rising/falling smoothly
+#### Metrics Row
+Two metric cards below the guidance pad:
+- **Confidence**: Bar + percentage showing tracking quality
+- **Distance**: Numeric value in grid units
 
-### 3) Locked (Found It)
-- Screen simplifies:
-  - center shows "ON TARGET" + steady green ring
-  - arrow disappears
-- Optional small "Hold" timer indicating stability duration
+### Sidebar: Secondary Information
 
-Trigger: distance < `lock_radius` AND confidence > `lock_conf` for `lock_hold_s`.
+#### Tuned Regions Card
+Four horizontal bars showing signal strength for each direction-tuned region:
+- Vx+ (right-tuned)
+- Vx- (left-tuned)
+- Vy+ (up-tuned)
+- Vy- (down-tuned)
 
-### 4) Signal Fault
-- Full-width amber/red banner:
-  - "SIGNAL QUALITY LOW"
-  - a single recommended action (e.g. "Check connections" / "Ignore channels 12, 801, ...")
+#### Heatmap Card
+Two small heatmaps (side by side):
+- **Live Activity**: Current high-gamma power map with center marker
+- **Memory Map**: Accumulated structure showing all 4 regions
 
-## Guidance Vector Definition (Critical)
+### Footer (Controls)
+- Backend URL input field
+- Connect/Disconnect button
+- Reset button (clears tracking memory)
 
-If the tuned region appears offset in the array frame, the surgeon should move the array **toward that offset in the real world**. Because the array frame moves with the array, guidance is the **opposite** of the observed offset:
+## UI States
+
+### 1. Disconnected
+- Status chip: Red indicator, "DISCONNECTED"
+- Instruction: "CONNECT TO BEGIN"
+- All metrics show "--"
+- Guidance arrow hidden
+
+### 2. Acquiring
+- Status chip: Amber indicator (pulsing), "CONNECTED"
+- Instruction panel: Amber background, "ACQUIRING SIGNAL"
+- Sub-instruction: "Move slowly while signal stabilizes"
+- Confidence < 40%
+
+### 3. Tracking
+- Status chip: Green indicator, "CONNECTED"
+- Instruction: Direction command (e.g., "MOVE UP RIGHT")
+- Guidance arrow visible, pointing in direction to move
+- Confidence bar shows current value
+
+### 4. On Target
+- Instruction panel: Green background, "ON TARGET"
+- Sub-instruction: "Hold position - array is centered"
+- Target ring turns solid green
+- Guidance arrow hidden
+- Triggers when: distance < 1.5 grid units AND confidence > 72%
+
+## Data Contract
+
+The frontend expects WebSocket messages from the backend.
+
+### Init Message
+```json
+{
+  "type": "init",
+  "grid_size": 32,
+  "fs": 500.0,
+  "ui_hz": 15.0
+}
+```
+
+### Compass Frame Message
+```json
+{
+  "type": "compass_frame",
+  "t_s": 12.34,
+  "center_row": 15.5,
+  "center_col": 14.2,
+  "confidence": 0.85,
+  "distance": 2.3,
+  "move_row": 0.3,
+  "move_col": -0.2,
+  "spots": [[10, 12, 0.8], [20, 12, 0.7], ...],
+  "spots_mem": [[10, 12, 0.8], ...],
+  "regions": {
+    "vx_pos": [15.5, 22.0, 0.9],
+    "vx_neg": [15.5, 8.0, 0.85],
+    "vy_pos": [8.0, 15.5, 0.7],
+    "vy_neg": [22.0, 15.5, 0.6]
+  },
+  "heatmap": [[...], ...],
+  "memory": [[...], ...]
+}
+```
+
+### Reset Command (Frontend to Backend)
+```json
+{
+  "type": "reset"
+}
+```
+
+## Guidance Vector Definition
+
+The guidance arrow shows where to MOVE the array, not where the signal is:
 - `delta = estimated_center - grid_center`
-- `move = -delta` (direction to move the array)
+- `move = -delta` (opposite of offset)
 
-The arrow displays `move`, not `delta`.
+This is because moving the array in direction X causes the signal to appear to move in direction -X on the grid.
 
-## Performance Targets
+## Performance
 
-From `docs/data_stream.md`:
-- ingest 500 Hz batches, but UI update at ~10-20 Hz (frame skipping allowed)
-- processing should be causal and stable; prioritize low-latency over perfect offline filtering
+- UI updates at 10-20 Hz (configurable via backend)
+- Heatmaps are optional (can be disabled for bandwidth)
+- All rendering is lightweight (no heavy frameworks)
 
-## Color / Typography Direction
+## Mobile Support
 
-Industrial + clinical:
-- Deep charcoal background, off-white type
-- Surgical green for "go/locked"
-- Amber for "uncertain/searching"
-- Red for "fault"
-- Typography: condensed display for the compass wordmark, highly legible sans for numbers
+The layout is responsive:
+- Below 1024px: Single column layout
+- Below 768px: Stacked panels, smaller instruction text
+- Touch-friendly button sizes
 
-## What We Render (Data Contract)
+## Files
 
-Frontend expects `type: "compass_frame"` messages:
-- `t_s`
-- `center_row`, `center_col`
-- `confidence` (0..1)
-- `distance` (grid units)
-- `move_row`, `move_col` (normalized -1..1)
-- `spots` (list of `[row, col, weight]`, optional)
-- `spots_mem` (list of `[row, col, weight]` in memory/template coords, optional)
-- `heatmap` (32x32 float array, optional)
-- `memory` (32x32 float array, optional)
-
-## "OR-Ready" Details
-
-- Default font sizes assume distance viewing.
-- Avoid tiny legends; use a small number of labels, always in the same place.
-- Use motion only to communicate state changes (lock acquisition, confidence collapse), never decorative.
+- `example_app/index.html` - HTML structure
+- `example_app/style.css` - Styles (light theme)
+- `example_app/app.js` - WebSocket connection and rendering logic

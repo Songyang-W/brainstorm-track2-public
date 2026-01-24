@@ -3,115 +3,131 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Compass | OR Guidance</title>
+    <title>Array Placement</title>
     <link rel="stylesheet" href="style.css" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700;800&family=Spline+Sans+Mono:wght@400;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap"
       rel="stylesheet"
     />
   </head>
   <body>
-    <div class="shell">
-      <header class="mast">
-        <div class="mast-left">
-          <div class="brand" aria-label="Compass">
-            <div class="brand-mark" aria-hidden="true"></div>
-            <div>
-              <div class="brand-name">Compass</div>
-              <div class="brand-tag">Array placement guidance</div>
-            </div>
-          </div>
+    <div class="app" id="app">
+      <!-- Main Display - Surgeon sees this from across the room -->
+      <main class="main-display" id="main-display">
+        <!-- Giant Direction Arrow -->
+        <div class="arrow-container" id="arrow-container">
+          <svg id="direction-arrow" viewBox="0 0 200 200" class="direction-arrow">
+            <!-- Background circle -->
+            <circle cx="100" cy="100" r="95" class="arrow-bg" />
+
+            <!-- Target zone (center) -->
+            <circle cx="100" cy="100" r="20" class="target-zone" id="target-zone" />
+
+            <!-- The arrow -->
+            <g id="arrow-group" class="arrow-group">
+              <line x1="100" y1="100" x2="100" y2="100" id="arrow-shaft" class="arrow-shaft" />
+              <polygon id="arrow-head" class="arrow-head" points="100,30 85,55 115,55" />
+            </g>
+
+            <!-- On-target checkmark (hidden by default) -->
+            <g id="check-group" class="check-group" style="display: none;">
+              <circle cx="100" cy="100" r="45" class="check-bg" />
+              <polyline points="75,100 92,117 125,84" class="check-mark" />
+            </g>
+          </svg>
         </div>
 
-        <div class="mast-mid">
-          <div class="state acquiring" id="state-chip" aria-live="polite">
-            <span class="dot" id="status-indicator" aria-hidden="true"></span>
-            <span id="status-text">DISCONNECTED</span>
-          </div>
+        <!-- Giant Instruction Text -->
+        <div class="instruction-area">
+          <div class="instruction-text" id="instruction-text">CONNECT</div>
+          <div class="instruction-detail" id="instruction-detail">Press Connect below</div>
         </div>
 
-        <div class="mast-right" aria-label="Readouts">
-          <div class="ro">
-            <div class="ro-label">Time</div>
-            <div class="ro-val" id="time-display">0.00s</div>
+        <!-- Distance indicator (simple bar) -->
+        <div class="distance-bar-container" id="distance-bar-container">
+          <div class="distance-bar">
+            <div class="distance-fill" id="distance-fill"></div>
+            <div class="distance-marker" id="distance-marker"></div>
           </div>
-          <div class="ro">
-            <div class="ro-label">Confidence</div>
-            <div class="ro-val" id="confidence-display">--</div>
+          <div class="distance-labels">
+            <span>FAR</span>
+            <span>ON TARGET</span>
           </div>
-          <div class="ro">
-            <div class="ro-label">Distance</div>
-            <div class="ro-val" id="distance-display">--</div>
-          </div>
+        </div>
+      </main>
+
+      <!-- Status Strip (minimal) -->
+      <header class="status-strip">
+        <div class="status-left">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="status-text" id="status-text">Disconnected</span>
+        </div>
+        <div class="status-right">
+          <span class="time-display" id="time-display">--</span>
         </div>
       </header>
 
-      <main class="grid">
-        <section class="card guidance" aria-label="Guidance">
-          <div class="dial-wrap" id="dial-wrap">
-            <div class="dial" aria-hidden="true">
-              <div class="dial-inner"></div>
-              <div class="needle" id="needle"></div>
-              <div class="dial-center">
-                <div class="lock-badge" id="lock">
-                  <div>
-                    <div class="lock-title">On Target</div>
-                    <div class="lock-sub">Hold position</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="command" aria-label="Command">
-            <div class="cmd-main" id="move-text">ACQUIRING…</div>
-            <div class="cmd-sub">
-              <div>Offset <strong id="offset-display">—</strong></div>
-              <div>Quality <strong id="quality-display">—</strong></div>
-            </div>
-          </div>
-        </section>
-
-        <aside class="card diag" aria-label="Diagnostics">
-          <div class="diag-title">
-            <h2>Maps</h2>
-            <div class="tiny">Live signal + accumulated memory</div>
-          </div>
-
-          <div class="maps">
-            <div class="map" aria-label="Live map">
-              <div class="map-top">
-                <div class="map-label">Live</div>
-                <div class="map-hint">center + anchors</div>
-              </div>
-              <canvas id="heatmap-canvas" width="320" height="320"></canvas>
-            </div>
-
-            <div class="map" aria-label="Memory map">
-              <div class="map-top">
-                <div class="map-label">Memory</div>
-                <div class="map-hint">stable cluster parts</div>
-              </div>
-              <canvas id="memory-canvas" width="320" height="320"></canvas>
-            </div>
-          </div>
-        </aside>
-      </main>
-
-      <footer class="bar">
-        <div class="controls">
-          <label for="server-url">Backend WS</label>
-          <input type="text" id="server-url" value="ws://localhost:8767" />
-          <button class="primary" id="connect-btn">Connect</button>
-          <button class="ghost" id="reset-btn">Reset</button>
+      <!-- Controls (collapsed by default, expand on hover/tap) -->
+      <footer class="controls-panel" id="controls-panel">
+        <div class="controls-toggle" id="controls-toggle">
+          <span>Controls</span>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
         </div>
-        <div class="footnote">Reset clears tracking memory for clean re-acquisition.</div>
+        <div class="controls-content" id="controls-content">
+          <div class="control-row">
+            <input type="text" id="ws-input" class="ws-input" value="ws://localhost:8767" placeholder="Backend URL" />
+            <button id="connect-btn" class="btn btn-connect">Connect</button>
+            <button id="reset-btn" class="btn btn-reset">Reset</button>
+          </div>
+          <div class="control-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="show-debug" />
+              <span>Show debug view</span>
+            </label>
+          </div>
+        </div>
       </footer>
+
+      <!-- Debug Panel (hidden by default) -->
+      <aside class="debug-panel" id="debug-panel">
+        <div class="debug-header">Debug View</div>
+        <div class="debug-content">
+          <div class="debug-heatmaps">
+            <div class="heatmap-box">
+              <div class="heatmap-label">Live Activity</div>
+              <canvas id="heatmap-live" width="256" height="256"></canvas>
+            </div>
+            <div class="heatmap-box">
+              <div class="heatmap-label">Memory Map</div>
+              <canvas id="heatmap-memory" width="256" height="256"></canvas>
+            </div>
+          </div>
+          <div class="debug-metrics">
+            <div class="metric">
+              <span class="metric-label">Center</span>
+              <span class="metric-value" id="debug-center">--, --</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Confidence</span>
+              <span class="metric-value" id="debug-confidence">--%</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Distance</span>
+              <span class="metric-value" id="debug-distance">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Regions</span>
+              <span class="metric-value" id="debug-regions">--</span>
+            </div>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <script src="app.js"></script>
   </body>
 </html>
-

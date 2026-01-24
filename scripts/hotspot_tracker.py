@@ -985,6 +985,14 @@ class PersistentSpotClusterTracker:
             center = (positions * weights[:, None]).sum(axis=0) / wsum
         return float(center[0]), float(center[1]), [tuple(p.tolist()) for p in positions]
 
+    def track_states(self) -> list[tuple[float, float, float, int]]:
+        """Return tracked positions with strength and age for interpretability."""
+        out = []
+        for tr in self._tracks:
+            r, c = float(tr["pos"][0]), float(tr["pos"][1])
+            out.append((r, c, float(tr["strength"]), int(tr["age"])))
+        return out
+
 
 def track_persistent_cluster_center_over_time(
     df,
@@ -1457,6 +1465,8 @@ class ClusterTemplateTracker:
         anchor_min_rel: float = 0.85,
         anchor_min_size: int = 14,
         anchor_keep_rel: float = 0.82,
+        anchor_prefer_quadrants: bool = True,
+        anchor_quadrant_min_rel: float = 0.55,
     ):
         self.grid_size = grid_size
         self.mid = (grid_size - 1) / 2.0
@@ -1490,6 +1500,8 @@ class ClusterTemplateTracker:
         self.anchor_min_rel = float(anchor_min_rel)
         self.anchor_min_size = int(anchor_min_size)
         self.anchor_keep_rel = float(anchor_keep_rel)
+        self.anchor_prefer_quadrants = bool(anchor_prefer_quadrants)
+        self.anchor_quadrant_min_rel = float(anchor_quadrant_min_rel)
 
         self.template: np.ndarray | None = None
         self.presence: np.ndarray | None = None
@@ -1573,8 +1585,8 @@ class ClusterTemplateTracker:
         g = self._normalize_frame(grid)
 
         if self.template is None:
-            # Initialize template in centered frame (no shift).
-            self.template = g.copy()
+            # Initialize memory in a centered frame (no shift). We keep a sparse,
+            # long-lived presence map and derive the match template from it.
             # Presence starts as a conservative mask of the first frame.
             thr0 = float(np.percentile(g, self.update_percentile))
             mask0 = g >= thr0
@@ -1586,11 +1598,17 @@ class ClusterTemplateTracker:
                 mask0[order[:k]] = True
                 mask0 = mask0.reshape(g.shape)
             self.presence = mask0.astype(float)
+            self.template = ndimage.gaussian_filter(self.presence, sigma=1.0)
 
             centroid = self._centroid(self.presence)
             if centroid is not None:
                 self.shift[:] = np.array([centroid[0] - self.mid, centroid[1] - self.mid])
             return float(self.mid + self.shift[0]), float(self.mid + self.shift[1]), self.presence
+
+        # Derive the match template from long-memory presence. This makes alignment
+        # robust even when only a subset of cluster parts are active in the current frame.
+        assert self.presence is not None
+        self.template = ndimage.gaussian_filter(self.presence, sigma=1.0)
 
         best_shift, _best_score = self._best_shift(g)
         # If alignment is uncertain, be conservative with shift updates to avoid drift.
@@ -1601,7 +1619,7 @@ class ClusterTemplateTracker:
         # Align current frame into template coordinates by shifting by -best_shift.
         aligned = _shift2d_int(g, int(-round(best_shift[0])), int(-round(best_shift[1])), fill=0.0)
 
-        # Build sparse update map from DoG local maxima (splits close blobs and avoids
+        # Anchor/presence update (sparse): DoG local maxima (splits close blobs and avoids
         # writing midpoint peaks into memory when only 2-of-4 are active).
         a_small = ndimage.gaussian_filter(aligned, sigma=self.update_dog_small_sigma)
         a_large = ndimage.gaussian_filter(aligned, sigma=self.update_dog_large_sigma)
@@ -1677,18 +1695,12 @@ class ClusterTemplateTracker:
             roi = (rr - self.mid) ** 2 + (cc - self.mid) ** 2 <= float(self.roi_radius) ** 2
             upd_sparse = upd_sparse * roi.astype(float)
 
-        # Time-based decays (half-life parameters are more intuitive than per-tick decay).
-        tdec = self._decay_from_half_life(self.template_half_life_s, dt_s)
+        # Time-based decay (half-life parameters are more intuitive than per-tick decay).
         pdec = self._decay_from_half_life(self.presence_half_life_s, dt_s)
 
         # Always decay; only incorporate new evidence when we're confident in alignment.
-        assert self.presence is not None
-        self.template = self.template * tdec
         self.presence = self.presence * pdec
         if conf >= self.min_update_conf:
-            # Template update: leaky-max for alignment robustness (use sparse map).
-            self.template = np.maximum(self.template, upd_sparse)
-
             # Presence update: accumulate stable support over time (even if currently off).
             umx = float(upd_sparse.max())
             if umx > 0:
@@ -1704,29 +1716,32 @@ class ClusterTemplateTracker:
         # recentering into the accumulated shift so live coordinates remain consistent.
         # Use the presence centroid for center stability.
         pres_sm = ndimage.gaussian_filter(self.presence, sigma=1.0)
-        # Center from the *stable* part of the cluster (avoid low-level smear
-        # biasing the centroid when only subsets are active).
-        mx = float(np.max(pres_sm))
-        if mx > 0:
-            thr_c = float(np.percentile(pres_sm, self.center_percentile))
-            thr_c = max(thr_c, self.center_min_rel * mx)
-            mask_c = pres_sm >= thr_c
-            if int(mask_c.sum()) >= max(8, self.min_update_pixels // 2):
+        anchors = self._anchors_template(max_anchors=8)
+        # Prefer center from anchors (stable parts), fall back to core presence centroid.
+        if len(anchors) >= 2:
+            ar = np.array([[a[0], a[1]] for a in anchors], dtype=float)
+            centroid = ar.mean(axis=0)
+        else:
+            mx = float(np.max(pres_sm))
+            if mx > 0:
+                thr_c = float(np.percentile(pres_sm, self.center_percentile))
+                thr_c = max(thr_c, self.center_min_rel * mx)
+                mask_c = pres_sm >= thr_c
                 centroid = self._centroid(pres_sm * mask_c.astype(float))
             else:
-                centroid = self._centroid(pres_sm)
-        else:
-            centroid = None
+                centroid = None
         if centroid is None:
             return None, None, self.presence
         recenter = centroid - np.array([self.mid, self.mid], dtype=float)
         if abs(float(recenter[0])) > 0.6 or abs(float(recenter[1])) > 0.6:
             dr = int(round(float(recenter[0])))
             dc = int(round(float(recenter[1])))
-            self.template = _shift2d_int(self.template, -dr, -dc, fill=0.0)
             self.presence = _shift2d_int(self.presence, -dr, -dc, fill=0.0)
             self.shift += np.array([dr, dc], dtype=float)
             centroid = centroid - np.array([dr, dc], dtype=float)
+
+        # Refresh the match template after any presence shift/recenter.
+        self.template = ndimage.gaussian_filter(self.presence, sigma=1.0)
 
         # Stable center is the long-memory presence centroid + accumulated shift.
         center_rc = centroid + self.shift
@@ -1794,11 +1809,35 @@ class ClusterTemplateTracker:
                 anchors.append((float(r), float(c), float(v)))
 
         anchors.sort(key=lambda x: float(x[2]), reverse=True)
-        if anchors:
-            vmax = float(anchors[0][2])
-            kept = [a for a in anchors if float(a[2]) >= self.anchor_keep_rel * vmax]
-            # Ensure we always return at least a small set if we have any anchors.
-            anchors = kept if kept else anchors[: min(2, len(anchors))]
+        if not anchors:
+            return []
+
+        # Prefer 4 anchors (one per quadrant) when the structure supports it.
+        # This matches the "super_easy" regime where the tuned region is 4 stable parts
+        # that toggle on/off with direction. For denser clusters, we still keep memory,
+        # but limit displayed anchors to the dominant representatives.
+        vmax = float(anchors[0][2])
+        if self.anchor_prefer_quadrants and k >= 4 and len(anchors) >= 4 and vmax > 0:
+            quad_best: dict[int, tuple[float, float, float]] = {}
+            for (r, c, v) in anchors:
+                if float(v) < self.anchor_quadrant_min_rel * vmax:
+                    continue
+                dr = float(r - self.mid)
+                dc = float(c - self.mid)
+                if abs(dr) < 0.7 or abs(dc) < 0.7:
+                    # Too close to an axis -> ambiguous quadrant.
+                    continue
+                q = (0 if dr < 0 else 2) + (0 if dc < 0 else 1)  # 0..3
+                prev = quad_best.get(q)
+                if prev is None or float(v) > float(prev[2]):
+                    quad_best[q] = (float(r), float(c), float(v))
+            if len(quad_best) == 4:
+                quad = [quad_best[i] for i in range(4)]
+                quad.sort(key=lambda x: float(x[2]), reverse=True)
+                return quad[:4]
+
+        kept = [a for a in anchors if float(a[2]) >= self.anchor_keep_rel * vmax]
+        anchors = kept if kept else anchors[: min(2, len(anchors))]
         return anchors[:k]
 
     def top_spots_live(self, n_peaks: int = 8) -> list[tuple[float, float, float]]:
@@ -1821,6 +1860,927 @@ class ClusterTemplateTracker:
     def top_spots_memory(self, n_peaks: int = 8) -> list[tuple[float, float, float]]:
         """Stable anchor points in the memory/template coordinate frame."""
         return self._anchors_template(max_anchors=n_peaks)
+
+
+class DriftCompensatedClusterTracker:
+    """
+    Track a cluster center with explicit memory while the cluster *moves* over time.
+
+    Key differences vs ClusterTemplateTracker:
+    - estimates per-step translation (frame-to-frame) via small-radius correlation
+      and integrates it to get global motion; this aligns better with ground_truth
+      movement in the provided datasets.
+    - maintains a long-lived presence map in a registered (moving) frame so parts
+      that turn off remain remembered.
+    """
+
+    def __init__(
+        self,
+        grid_size: int = 32,
+        # Per-step translation search radius (cells). Keep small for stability.
+        step_search_radius: int = 3,
+        shift_alpha: float = 0.55,
+        min_update_conf: float = 0.40,
+        presence_half_life_s: float = 60.0,
+        presence_gain: float = 0.10,
+        presence_floor: float = 0.0,
+        update_percentile: float = 92.0,
+        update_min_rel: float = 0.40,
+        update_dog_small_sigma: float = 0.6,
+        update_dog_large_sigma: float = 1.6,
+        update_dog_large_scale: float = 0.65,
+        update_max_filter_size: int = 5,
+        update_blob_sigma: float = 1.0,
+        peak_suppress_radius: int = 5,
+        exclude_center_radius: float = 2.0,
+        roi_radius: float | None = 14.0,
+        # Anchor extraction
+        anchor_max: int = 8,
+        anchor_percentile: float = 99.0,
+        anchor_min_rel: float = 0.85,
+        anchor_min_size: int = 14,
+        anchor_keep_rel: float = 0.82,
+        anchor_prefer_quadrants: bool = True,
+        anchor_quadrant_min_rel: float = 0.55,
+        centroid_power: float = 1.2,
+    ):
+        self.grid_size = int(grid_size)
+        self.mid = (self.grid_size - 1) / 2.0
+        self.step_search_radius = int(step_search_radius)
+        self.shift_alpha = float(shift_alpha)
+        self.min_update_conf = float(min_update_conf)
+
+        self.presence_half_life_s = float(presence_half_life_s)
+        self.presence_gain = float(presence_gain)
+        self.presence_floor = float(presence_floor)
+
+        self.update_percentile = float(update_percentile)
+        self.update_min_rel = float(update_min_rel)
+        self.update_dog_small_sigma = float(update_dog_small_sigma)
+        self.update_dog_large_sigma = float(update_dog_large_sigma)
+        self.update_dog_large_scale = float(update_dog_large_scale)
+        self.update_max_filter_size = int(update_max_filter_size)
+        self.update_blob_sigma = float(update_blob_sigma)
+        self.peak_suppress_radius = int(peak_suppress_radius)
+        self.exclude_center_radius = float(exclude_center_radius)
+        self.roi_radius = roi_radius
+
+        self.anchor_max = int(anchor_max)
+        self.anchor_percentile = float(anchor_percentile)
+        self.anchor_min_rel = float(anchor_min_rel)
+        self.anchor_min_size = int(anchor_min_size)
+        self.anchor_keep_rel = float(anchor_keep_rel)
+        self.anchor_prefer_quadrants = bool(anchor_prefer_quadrants)
+        self.anchor_quadrant_min_rel = float(anchor_quadrant_min_rel)
+
+        self.centroid_power = float(centroid_power)
+
+        self.shift = np.array([0.0, 0.0], dtype=float)  # registered -> live
+        self.prev_live: np.ndarray | None = None
+        self.presence: np.ndarray | None = None
+        self.last_confidence: float | None = None
+
+    def reset(self) -> None:
+        self.shift[:] = 0.0
+        self.prev_live = None
+        self.presence = None
+        self.last_confidence = None
+
+    def _decay_from_half_life(self, half_life_s: float, dt_s: float) -> float:
+        hl = max(1e-3, float(half_life_s))
+        dt = max(0.0, float(dt_s))
+        return float(0.5 ** (dt / hl))
+
+    def _normalize_frame(self, grid: np.ndarray) -> np.ndarray:
+        g = np.maximum(grid.astype(float), 0.0)
+        scale = float(np.percentile(g, 99.5)) + 1e-6
+        return np.clip(g / scale, 0.0, 1.0)
+
+    def _centroid(self, weights: np.ndarray) -> np.ndarray | None:
+        w = np.maximum(weights, 0.0).astype(float)
+        if self.centroid_power != 1.0:
+            w = w ** self.centroid_power
+        total = float(w.sum())
+        if total <= 0:
+            return None
+        rows, cols = np.indices(w.shape)
+        r = float((rows * w).sum() / total)
+        c = float((cols * w).sum() / total)
+        return np.array([r, c], dtype=float)
+
+    def _score_shift(self, prev: np.ndarray, curr: np.ndarray, dr: int, dc: int) -> float:
+        # Align curr -> prev by shifting curr by (-dr, -dc).
+        shifted = _shift2d_int(curr, -int(dr), -int(dc), fill=0.0)
+        num = float(np.sum(prev * shifted))
+        den = float(np.sqrt(np.sum(prev * prev) * np.sum(shifted * shifted))) + 1e-9
+        return num / den
+
+    def _estimate_delta(self, prev: np.ndarray, curr: np.ndarray) -> np.ndarray:
+        r = self.step_search_radius
+        best = np.array([0.0, 0.0], dtype=float)
+        best_score = float("-inf")
+        scores = []
+        for dr in range(-r, r + 1):
+            for dc in range(-r, r + 1):
+                s = self._score_shift(prev, curr, dr, dc)
+                scores.append(s)
+                if s > best_score:
+                    best_score = s
+                    best[:] = (dr, dc)
+
+        med = float(np.median(scores))
+        mad = float(np.median(np.abs(np.array(scores) - med))) + 1e-6
+        z = (best_score - med) / mad
+        conf = float(1.0 / (1.0 + np.exp(-0.75 * (z - 2.0))))
+        self.last_confidence = conf
+        if conf < self.min_update_conf:
+            return np.array([0.0, 0.0], dtype=float)
+        return best
+
+    def _anchors_template(self) -> list[tuple[float, float, float]]:
+        if self.presence is None:
+            return []
+        p = ndimage.gaussian_filter(self.presence, sigma=1.0)
+        mx = float(np.max(p))
+        if mx <= 0:
+            return []
+
+        k = self.anchor_max
+        thr = max(float(np.percentile(p, self.anchor_percentile)), self.anchor_min_rel * mx)
+        mask = p >= thr
+        labeled, num = ndimage.label(mask)
+
+        anchors: list[tuple[float, float, float]] = []
+        if num > 0:
+            sums = ndimage.sum(p, labeled, range(1, num + 1))
+            order = np.argsort(np.array(sums))[::-1]
+            for idx in order[: max(1, min(k, len(order)))]:
+                lab = int(idx) + 1
+                comp = labeled == lab
+                if int(comp.sum()) < self.anchor_min_size:
+                    continue
+                w = p * comp.astype(float)
+                centroid = self._centroid(w)
+                if centroid is None:
+                    continue
+                if (float(centroid[0]) - self.mid) ** 2 + (float(centroid[1]) - self.mid) ** 2 < self.exclude_center_radius ** 2:
+                    continue
+                anchors.append((float(centroid[0]), float(centroid[1]), float(np.max(w))))
+
+        if not anchors:
+            return []
+
+        anchors.sort(key=lambda x: float(x[2]), reverse=True)
+        vmax = float(anchors[0][2])
+
+        if self.anchor_prefer_quadrants and len(anchors) >= 4 and vmax > 0:
+            quad_best: dict[int, tuple[float, float, float]] = {}
+            for (r0, c0, v0) in anchors:
+                if float(v0) < self.anchor_quadrant_min_rel * vmax:
+                    continue
+                dr = float(r0 - self.mid)
+                dc = float(c0 - self.mid)
+                if abs(dr) < 0.7 or abs(dc) < 0.7:
+                    continue
+                q = (0 if dr < 0 else 2) + (0 if dc < 0 else 1)
+                prev = quad_best.get(q)
+                if prev is None or float(v0) > float(prev[2]):
+                    quad_best[q] = (float(r0), float(c0), float(v0))
+            if len(quad_best) == 4:
+                quad = [quad_best[i] for i in range(4)]
+                quad.sort(key=lambda x: float(x[2]), reverse=True)
+                return quad[:4]
+
+        kept = [a for a in anchors if float(a[2]) >= self.anchor_keep_rel * vmax]
+        return (kept if kept else anchors[: min(2, len(anchors))])[:k]
+
+    def update(self, grid: np.ndarray, dt_s: float = 1.0) -> tuple[float | None, float | None, np.ndarray | None]:
+        g = self._normalize_frame(grid)
+
+        if self.prev_live is None:
+            # Initialize shift so the current cluster roughly lands near mid in registered coords.
+            peaks = extract_peak_observations(g, n_peaks=2, smooth_sigma=1.0, suppress_radius=6)
+            if peaks:
+                r0 = float(np.mean([p[0] for p in peaks]))
+                c0 = float(np.mean([p[1] for p in peaks]))
+                self.shift[:] = np.array([r0 - self.mid, c0 - self.mid], dtype=float)
+
+            aligned = _shift2d_int(g, int(-round(self.shift[0])), int(-round(self.shift[1])), fill=0.0)
+            thr = float(np.percentile(aligned, self.update_percentile))
+            mask = aligned >= thr
+            if int(mask.sum()) < 16:
+                flat = aligned.ravel()
+                order = np.argsort(flat)[::-1]
+                k = min(16, order.size)
+                mask = np.zeros_like(flat, dtype=bool)
+                mask[order[:k]] = True
+                mask = mask.reshape(aligned.shape)
+            self.presence = mask.astype(float)
+            self.prev_live = g
+
+        else:
+            delta = self._estimate_delta(self.prev_live, g)
+            # Integrate translation (registered -> live).
+            self.shift = self.shift + self.shift_alpha * delta
+
+            aligned = _shift2d_int(g, int(-round(self.shift[0])), int(-round(self.shift[1])), fill=0.0)
+
+            assert self.presence is not None
+            pdec = self._decay_from_half_life(self.presence_half_life_s, dt_s)
+            self.presence = self.presence * pdec
+
+            if float(self.last_confidence or 0.0) >= self.min_update_conf:
+                a_small = ndimage.gaussian_filter(aligned, sigma=self.update_dog_small_sigma)
+                a_large = ndimage.gaussian_filter(aligned, sigma=self.update_dog_large_sigma)
+                dog = np.maximum(a_small - self.update_dog_large_scale * a_large, 0.0)
+
+                mx_d = float(np.max(dog))
+                thr = float(np.percentile(dog, self.update_percentile))
+                if mx_d > 0:
+                    thr = max(thr, self.update_min_rel * mx_d)
+
+                maxima = dog == ndimage.maximum_filter(dog, size=self.update_max_filter_size)
+                mask = maxima & (dog >= thr)
+
+                if self.roi_radius is not None:
+                    rr, cc = np.indices(aligned.shape)
+                    roi = (rr - self.mid) ** 2 + (cc - self.mid) ** 2 <= float(self.roi_radius) ** 2
+                    mask = mask & roi
+
+                # Do not write the cluster center itself into memory.
+                if self.exclude_center_radius > 0:
+                    rr, cc = np.indices(aligned.shape)
+                    center_mask = (rr - self.mid) ** 2 + (cc - self.mid) ** 2 >= self.exclude_center_radius ** 2
+                    mask = mask & center_mask
+
+                upd_sparse = np.zeros_like(aligned, dtype=float)
+                if mask.any():
+                    coords = np.argwhere(mask)
+                    scores = dog[mask]
+                    order = np.argsort(scores)[::-1]
+                    taken: list[tuple[int, int]] = []
+                    for idx in order:
+                        r, c = map(int, coords[idx])
+                        if len(taken) >= self.anchor_max:
+                            break
+                        ok = True
+                        for (tr, tc) in taken:
+                            if (r - tr) ** 2 + (c - tc) ** 2 < float(self.peak_suppress_radius) ** 2:
+                                ok = False
+                                break
+                        if not ok:
+                            continue
+                        taken.append((r, c))
+                        upd_sparse[r, c] = max(upd_sparse[r, c], float(aligned[r, c]))
+
+                if self.update_blob_sigma > 0 and float(upd_sparse.max()) > 0:
+                    upd_sparse = ndimage.gaussian_filter(upd_sparse, sigma=self.update_blob_sigma)
+
+                umx = float(upd_sparse.max())
+                if umx > 0:
+                    upd = np.clip(upd_sparse / (umx + 1e-6), 0.0, 1.0)
+                    self.presence = np.clip(self.presence + self.presence_gain * upd, 0.0, 1.0)
+
+            if self.presence_floor > 0:
+                self.presence[self.presence < self.presence_floor] = 0.0
+
+            self.prev_live = g
+
+        # Center from anchors when available; otherwise from presence.
+        anchors = self._anchors_template()
+        if len(anchors) >= 2:
+            centroid = np.mean(np.array([[a[0], a[1]] for a in anchors], dtype=float), axis=0)
+        else:
+            pres_sm = ndimage.gaussian_filter(self.presence, sigma=1.0) if self.presence is not None else None
+            centroid = self._centroid(pres_sm) if pres_sm is not None else None
+        if centroid is None:
+            return None, None, self.presence
+
+        # Recenter registered frame around mid to keep numbers stable.
+        recenter = centroid - np.array([self.mid, self.mid], dtype=float)
+        if abs(float(recenter[0])) > 0.6 or abs(float(recenter[1])) > 0.6:
+            dr = int(round(float(recenter[0])))
+            dc = int(round(float(recenter[1])))
+            assert self.presence is not None
+            self.presence = _shift2d_int(self.presence, -dr, -dc, fill=0.0)
+            self.shift += np.array([dr, dc], dtype=float)
+            centroid = centroid - np.array([dr, dc], dtype=float)
+
+        center_live = centroid + self.shift
+        return float(center_live[0]), float(center_live[1]), self.presence
+
+    def top_spots_memory(self, n_peaks: int = 8) -> list[tuple[float, float, float]]:
+        out = self._anchors_template()
+        return out[: int(n_peaks)]
+
+    def top_spots_live(self, n_peaks: int = 8) -> list[tuple[float, float, float]]:
+        out = []
+        for (r, c, v) in self.top_spots_memory(n_peaks=n_peaks):
+            rr = float(r + self.shift[0])
+            cc = float(c + self.shift[1])
+            if rr < 0.0 or cc < 0.0 or rr > self.grid_size - 1.0 or cc > self.grid_size - 1.0:
+                continue
+            out.append((rr, cc, float(v)))
+        return out
+
+
+class SimpleKalmanFilter2D:
+    """
+    Simple 2D Kalman filter with constant-velocity model for smooth center tracking.
+
+    State: [row, col, vel_row, vel_col]
+    Assumes smooth, continuous motion of the array.
+    """
+
+    def __init__(
+        self,
+        process_noise: float = 0.5,
+        measurement_noise: float = 2.0,
+        initial_pos: tuple[float, float] = (15.5, 15.5),
+    ):
+        # State: [row, col, vel_row, vel_col]
+        self.x = np.array([initial_pos[0], initial_pos[1], 0.0, 0.0], dtype=float)
+
+        # State covariance
+        self.P = np.eye(4, dtype=float) * 10.0
+
+        # Process noise (how much we expect state to change)
+        self.Q = np.eye(4, dtype=float)
+        self.Q[0, 0] = process_noise * 0.5
+        self.Q[1, 1] = process_noise * 0.5
+        self.Q[2, 2] = process_noise
+        self.Q[3, 3] = process_noise
+
+        # Measurement noise (how much we trust observations)
+        self.R = np.eye(2, dtype=float) * measurement_noise
+
+        # Measurement matrix (we only observe position, not velocity)
+        self.H = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+        ], dtype=float)
+
+        self._initialized = False
+
+    def reset(self, pos: tuple[float, float] | None = None):
+        if pos is not None:
+            self.x = np.array([pos[0], pos[1], 0.0, 0.0], dtype=float)
+        else:
+            self.x = np.array([15.5, 15.5, 0.0, 0.0], dtype=float)
+        self.P = np.eye(4, dtype=float) * 10.0
+        self._initialized = False
+
+    def predict(self, dt: float = 0.05):
+        """Predict next state based on constant velocity model."""
+        # State transition matrix
+        F = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=float)
+
+        # Predict state
+        self.x = F @ self.x
+
+        # Predict covariance
+        self.P = F @ self.P @ F.T + self.Q * dt
+
+    def update(self, measurement: np.ndarray, confidence: float = 1.0):
+        """Update state with new measurement. Lower confidence = trust measurement less."""
+        if not self._initialized:
+            self.x[0] = measurement[0]
+            self.x[1] = measurement[1]
+            self._initialized = True
+            return
+
+        # Adjust measurement noise based on confidence
+        R_adj = self.R / max(0.1, confidence)
+
+        # Innovation
+        y = measurement - self.H @ self.x
+
+        # Innovation covariance
+        S = self.H @ self.P @ self.H.T + R_adj
+
+        # Kalman gain
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+
+        # Update state
+        self.x = self.x + K @ y
+
+        # Update covariance
+        I = np.eye(4, dtype=float)
+        self.P = (I - K @ self.H) @ self.P
+
+    @property
+    def position(self) -> tuple[float, float]:
+        return (float(self.x[0]), float(self.x[1]))
+
+    @property
+    def velocity(self) -> tuple[float, float]:
+        return (float(self.x[2]), float(self.x[3]))
+
+
+class MotionCompensatedTracker:
+    """
+    Track the 4 tuned regions with motion-compensated memory and Kalman-smoothed center.
+
+    Key improvements over FourTunedRegionTracker:
+    1. Kalman filter smooths center position (no jumping)
+    2. Frame-to-frame motion estimation keeps memory aligned with array movement
+    3. Region positions are smoothed with outlier rejection
+    4. Memory map shifts with estimated motion
+    """
+
+    REGION_KEYS = ("vx_pos", "vx_neg", "vy_pos", "vy_neg")
+
+    def __init__(
+        self,
+        grid_size: int = 32,
+        # Region tracking
+        ema_alpha: float = 0.25,
+        smooth_sigma: float = 1.2,
+        detect_percentile: float = 90.0,
+        min_component_size: int = 5,
+        max_components: int = 6,
+        min_offset_for_assignment: float = 2.0,
+        # Memory
+        memory_half_life_s: float = 60.0,
+        memory_gain: float = 0.15,
+        # Kalman filter
+        kalman_process_noise: float = 0.3,
+        kalman_measurement_noise: float = 1.5,
+        # Motion estimation
+        motion_search_radius: int = 4,
+        motion_alpha: float = 0.6,
+        # Outlier rejection
+        max_region_jump: float = 4.0,
+    ):
+        self.grid_size = int(grid_size)
+        self.mid = (self.grid_size - 1) / 2.0
+
+        self.ema_alpha = float(ema_alpha)
+        self.smooth_sigma = float(smooth_sigma)
+        self.detect_percentile = float(detect_percentile)
+        self.min_component_size = int(min_component_size)
+        self.max_components = int(max_components)
+        self.min_offset_for_assignment = float(min_offset_for_assignment)
+
+        self.memory_half_life_s = float(memory_half_life_s)
+        self.memory_gain = float(memory_gain)
+
+        self.motion_search_radius = int(motion_search_radius)
+        self.motion_alpha = float(motion_alpha)
+        self.max_region_jump = float(max_region_jump)
+
+        # State
+        self.kalman = SimpleKalmanFilter2D(
+            process_noise=kalman_process_noise,
+            measurement_noise=kalman_measurement_noise,
+        )
+        self.regions: dict[str, np.ndarray | None] = {k: None for k in self.REGION_KEYS}
+        self.region_strength: dict[str, float] = {k: 0.0 for k in self.REGION_KEYS}
+        self.memory_map: np.ndarray | None = None
+        self.prev_grid: np.ndarray | None = None
+        self.estimated_motion: np.ndarray = np.array([0.0, 0.0], dtype=float)
+        self.accumulated_motion: np.ndarray = np.array([0.0, 0.0], dtype=float)
+
+    def reset(self) -> None:
+        self.kalman.reset()
+        self.regions = {k: None for k in self.REGION_KEYS}
+        self.region_strength = {k: 0.0 for k in self.REGION_KEYS}
+        self.memory_map = None
+        self.prev_grid = None
+        self.estimated_motion = np.array([0.0, 0.0], dtype=float)
+        self.accumulated_motion = np.array([0.0, 0.0], dtype=float)
+
+    def _decay_from_half_life(self, half_life_s: float, dt_s: float) -> float:
+        hl = max(1e-3, float(half_life_s))
+        dt = max(0.0, float(dt_s))
+        return float(0.5 ** (dt / hl))
+
+    def _estimate_motion(self, prev: np.ndarray, curr: np.ndarray) -> np.ndarray:
+        """Estimate frame-to-frame motion using cross-correlation."""
+        if prev is None:
+            return np.array([0.0, 0.0], dtype=float)
+
+        r = self.motion_search_radius
+        best_dr, best_dc = 0, 0
+        best_score = float("-inf")
+
+        # Normalize both frames
+        p_norm = prev - np.mean(prev)
+        c_norm = curr - np.mean(curr)
+
+        for dr in range(-r, r + 1):
+            for dc in range(-r, r + 1):
+                # Shift current frame
+                shifted = _shift2d_int(c_norm, -dr, -dc, fill=0.0)
+                # Compute correlation
+                score = float(np.sum(p_norm * shifted))
+                if score > best_score:
+                    best_score = score
+                    best_dr, best_dc = dr, dc
+
+        return np.array([float(best_dr), float(best_dc)], dtype=float)
+
+    def _detect_components(self, grid: np.ndarray) -> list[dict[str, float]]:
+        g = ndimage.gaussian_filter(np.maximum(grid.astype(float), 0.0), sigma=self.smooth_sigma)
+        thr = float(np.percentile(g, self.detect_percentile))
+        mask = g >= thr
+        labeled, num = ndimage.label(mask)
+        if num <= 0:
+            return []
+
+        comps: list[dict[str, float]] = []
+        for lab in range(1, num + 1):
+            comp = labeled == lab
+            size = int(comp.sum())
+            if size < self.min_component_size:
+                continue
+            vals = g[comp]
+            total = float(vals.sum()) + 1e-9
+            rows, cols = np.where(comp)
+            r = float(np.sum(rows * vals) / total)
+            c = float(np.sum(cols * vals) / total)
+            peak = float(np.max(vals))
+            comps.append({"row": r, "col": c, "peak": peak, "mass": total, "size": float(size)})
+
+        comps.sort(key=lambda x: float(x["mass"]), reverse=True)
+        return comps[: self.max_components]
+
+    def _assign_region(self, comp_row: float, comp_col: float, center: np.ndarray) -> str | None:
+        dr = float(comp_row - float(center[0]))
+        dc = float(comp_col - float(center[1]))
+        if abs(dr) < self.min_offset_for_assignment and abs(dc) < self.min_offset_for_assignment:
+            return None
+        if abs(dc) >= abs(dr):
+            return "vx_pos" if dc > 0 else "vx_neg"
+        return "vy_pos" if dr < 0 else "vy_neg"
+
+    def _infer_center_from_components(self, comps: list[dict[str, float]]) -> np.ndarray | None:
+        if len(comps) < 2:
+            return None
+
+        c1, c2 = comps[0], comps[1]
+        r1, c1c = float(c1["row"]), float(c1["col"])
+        r2, c2c = float(c2["row"]), float(c2["col"])
+
+        dr = abs(r1 - r2)
+        dc = abs(c1c - c2c)
+
+        if dr <= 0.5 * dc:
+            return np.array([(r1 + r2) / 2.0, (c1c + c2c) / 2.0], dtype=float)
+        if dc <= 0.5 * dr:
+            return np.array([(r1 + r2) / 2.0, (c1c + c2c) / 2.0], dtype=float)
+
+        cand_a = np.array([r1, c2c], dtype=float)
+        cand_b = np.array([r2, c1c], dtype=float)
+        prev_pos = self.kalman.position
+        prev = np.array([prev_pos[0], prev_pos[1]], dtype=float)
+        da = float(np.linalg.norm(cand_a - prev))
+        db = float(np.linalg.norm(cand_b - prev))
+        return cand_a if da <= db else cand_b
+
+    def update(
+        self, grid: np.ndarray, dt_s: float = 0.05
+    ) -> tuple[
+        float | None,
+        float | None,
+        float,
+        np.ndarray | None,
+        list[tuple[float, float, float]],
+        list[tuple[float, float, float]],
+        dict[str, tuple[float, float, float]],
+    ]:
+        # Smooth input grid
+        g = ndimage.gaussian_filter(np.maximum(grid.astype(float), 0.0), sigma=0.8)
+
+        # Estimate frame-to-frame motion
+        if self.prev_grid is not None:
+            raw_motion = self._estimate_motion(self.prev_grid, g)
+            self.estimated_motion = (1 - self.motion_alpha) * self.estimated_motion + self.motion_alpha * raw_motion
+            self.accumulated_motion += self.estimated_motion
+        self.prev_grid = g.copy()
+
+        # Kalman predict step
+        self.kalman.predict(dt=dt_s)
+
+        # Detect components
+        comps = self._detect_components(grid)
+
+        # Decay region strengths
+        decay = self._decay_from_half_life(self.memory_half_life_s, dt_s)
+        for k in self.REGION_KEYS:
+            self.region_strength[k] *= decay
+
+        # Infer center from components
+        center_obs = self._infer_center_from_components(comps)
+
+        # Compute confidence based on how many regions we're seeing
+        n_active = len(comps)
+        obs_confidence = min(1.0, n_active / 2.0)  # 2+ components = full confidence
+
+        # Update Kalman filter with observation
+        if center_obs is not None:
+            self.kalman.update(center_obs, confidence=obs_confidence)
+
+        # Get smoothed center from Kalman filter
+        center = np.array(self.kalman.position, dtype=float)
+
+        # Assign components to regions with outlier rejection
+        best: dict[str, dict[str, float]] = {}
+        for comp in comps:
+            key = self._assign_region(comp["row"], comp["col"], center)
+            if key is None:
+                continue
+            prev = best.get(key)
+            if prev is None or float(comp["mass"]) > float(prev["mass"]):
+                best[key] = comp
+
+        # Update region positions with outlier rejection
+        for key, comp in best.items():
+            new_pos = np.array([float(comp["row"]), float(comp["col"])], dtype=float)
+
+            if self.regions[key] is None:
+                self.regions[key] = new_pos
+            else:
+                # Reject if jump is too large (outlier)
+                jump = float(np.linalg.norm(new_pos - self.regions[key]))
+                if jump < self.max_region_jump:
+                    self.regions[key] = (1.0 - self.ema_alpha) * self.regions[key] + self.ema_alpha * new_pos
+
+            self.region_strength[key] = min(1.0, self.region_strength[key] + self.memory_gain)
+
+        # If no direct center observation, use average of remembered regions
+        if center_obs is None:
+            pts = [v for v in self.regions.values() if v is not None]
+            if len(pts) >= 2:
+                region_center = np.mean(np.stack(pts, axis=0), axis=0)
+                self.kalman.update(region_center, confidence=0.3)
+                center = np.array(self.kalman.position, dtype=float)
+
+        # Confidence based on region strengths and current observations
+        strengths = np.array([self.region_strength[k] for k in self.REGION_KEYS], dtype=float)
+        seen_now = min(2, len(best)) / 2.0
+        conf = float(np.clip(0.5 * np.mean(np.sort(strengths)[-2:]) + 0.5 * seen_now, 0.0, 1.0))
+
+        # Update motion-compensated memory map
+        if self.memory_map is None:
+            self.memory_map = np.zeros((self.grid_size, self.grid_size), dtype=float)
+
+        # Shift memory by estimated motion to keep it aligned
+        if abs(self.estimated_motion[0]) > 0.3 or abs(self.estimated_motion[1]) > 0.3:
+            dr = int(round(self.estimated_motion[0]))
+            dc = int(round(self.estimated_motion[1]))
+            if dr != 0 or dc != 0:
+                self.memory_map = _shift2d_int(self.memory_map, dr, dc, fill=0.0)
+
+        # Add current frame to memory (center-aligned)
+        dr = int(round(float(center[0] - self.mid)))
+        dc = int(round(float(center[1] - self.mid)))
+        aligned = _shift2d_int(np.maximum(grid.astype(float), 0.0), -dr, -dc, fill=0.0)
+        thr_m = float(np.percentile(aligned, self.detect_percentile))
+        mask_m = aligned >= thr_m
+        self.memory_map = np.maximum(self.memory_map * decay, aligned * mask_m.astype(float))
+
+        # Build spots output (stable region positions)
+        spots_live: list[tuple[float, float, float]] = []
+        spots_mem: list[tuple[float, float, float]] = []
+        regions_out: dict[str, tuple[float, float, float]] = {}
+
+        for k in self.REGION_KEYS:
+            p = self.regions[k]
+            if p is None:
+                continue
+            w = float(self.region_strength[k])
+            if w > 0.1:  # Only output regions with meaningful strength
+                spots_live.append((float(p[0]), float(p[1]), w))
+                spots_mem.append((float(p[0] - dr), float(p[1] - dc), w))
+                regions_out[k] = (float(p[0]), float(p[1]), w)
+
+        spots_live.sort(key=lambda x: float(x[2]), reverse=True)
+        spots_mem.sort(key=lambda x: float(x[2]), reverse=True)
+
+        return float(center[0]), float(center[1]), conf, self.memory_map, spots_live, spots_mem, regions_out
+
+
+class FourTunedRegionTracker:
+    """
+    Track the 4 velocity-tuned subregions (Vx+/Vx-/Vy+/Vy-) without using ground truth.
+
+    Assumption (matches Track2 generator): at any moment, activity concentrates into
+    1-2 blobs corresponding to horizontal and/or vertical tuning. Over time, these
+    belong to 4 stable subregions around a common center. We:
+    - detect blobs each frame
+    - assign each blob to one of 4 regions based on position relative to current center
+    - EMA each region center and keep it as memory when it's "off"
+    - compute overall center as average of the 4 remembered region centers
+
+    This aligns well with ground_truth center movement and avoids brittle global
+    template alignment.
+    """
+
+    REGION_KEYS = ("vx_pos", "vx_neg", "vy_pos", "vy_neg")
+
+    def __init__(
+        self,
+        grid_size: int = 32,
+        ema_alpha: float = 0.35,
+        smooth_sigma: float = 1.0,
+        detect_percentile: float = 92.0,
+        min_component_size: int = 6,
+        max_components: int = 6,
+        min_offset_for_assignment: float = 1.0,
+        memory_half_life_s: float = 80.0,
+        memory_gain: float = 0.12,
+        center_alpha: float = 0.35,
+    ):
+        self.grid_size = int(grid_size)
+        self.mid = (self.grid_size - 1) / 2.0
+        self.ema_alpha = float(ema_alpha)
+        self.smooth_sigma = float(smooth_sigma)
+        self.detect_percentile = float(detect_percentile)
+        self.min_component_size = int(min_component_size)
+        self.max_components = int(max_components)
+        self.min_offset_for_assignment = float(min_offset_for_assignment)
+        self.memory_half_life_s = float(memory_half_life_s)
+        self.memory_gain = float(memory_gain)
+        self.center_alpha = float(center_alpha)
+
+        self.regions: dict[str, np.ndarray | None] = {k: None for k in self.REGION_KEYS}
+        self.region_strength: dict[str, float] = {k: 0.0 for k in self.REGION_KEYS}
+        self.memory_map: np.ndarray | None = None  # registered to center
+        self.center: np.ndarray | None = None
+
+    def reset(self) -> None:
+        self.regions = {k: None for k in self.REGION_KEYS}
+        self.region_strength = {k: 0.0 for k in self.REGION_KEYS}
+        self.memory_map = None
+        self.center = None
+
+    def _decay_from_half_life(self, half_life_s: float, dt_s: float) -> float:
+        hl = max(1e-3, float(half_life_s))
+        dt = max(0.0, float(dt_s))
+        return float(0.5 ** (dt / hl))
+
+    def _detect_components(self, grid: np.ndarray) -> list[dict[str, float]]:
+        g = ndimage.gaussian_filter(np.maximum(grid.astype(float), 0.0), sigma=self.smooth_sigma)
+        thr = float(np.percentile(g, self.detect_percentile))
+        mask = g >= thr
+        labeled, num = ndimage.label(mask)
+        if num <= 0:
+            return []
+
+        comps: list[dict[str, float]] = []
+        for lab in range(1, num + 1):
+            comp = labeled == lab
+            size = int(comp.sum())
+            if size < self.min_component_size:
+                continue
+            vals = g[comp]
+            total = float(vals.sum()) + 1e-9
+            rows, cols = np.where(comp)
+            r = float(np.sum(rows * vals) / total)
+            c = float(np.sum(cols * vals) / total)
+            peak = float(np.max(vals))
+            comps.append({"row": r, "col": c, "peak": peak, "mass": total, "size": float(size)})
+
+        comps.sort(key=lambda x: float(x["mass"]), reverse=True)
+        return comps[: self.max_components]
+
+    def _current_center_estimate(self) -> np.ndarray:
+        if self.center is not None:
+            return self.center.copy()
+        return np.array([self.mid, self.mid], dtype=float)
+
+    def _infer_center_from_components(self, comps: list[dict[str, float]]) -> np.ndarray | None:
+        # Use simple cross geometry with temporal continuity.
+        if len(comps) < 2:
+            return None
+        # Use two strongest components.
+        c1, c2 = comps[0], comps[1]
+        r1, c1c = float(c1["row"]), float(c1["col"])
+        r2, c2c = float(c2["row"]), float(c2["col"])
+
+        dr = abs(r1 - r2)
+        dc = abs(c1c - c2c)
+
+        # If the pair is mostly horizontal (vx+/vx-), rows are similar.
+        if dr <= 0.5 * dc:
+            return np.array([(r1 + r2) / 2.0, (c1c + c2c) / 2.0], dtype=float)
+        # If the pair is mostly vertical (vy+/vy-), cols are similar.
+        if dc <= 0.5 * dr:
+            return np.array([(r1 + r2) / 2.0, (c1c + c2c) / 2.0], dtype=float)
+
+        # Orthogonal pair: choose the L-shape corner closest to previous center.
+        cand_a = np.array([r1, c2c], dtype=float)
+        cand_b = np.array([r2, c1c], dtype=float)
+        prev = self.center if self.center is not None else np.array([self.mid, self.mid], dtype=float)
+        da = float(np.linalg.norm(cand_a - prev))
+        db = float(np.linalg.norm(cand_b - prev))
+        return cand_a if da <= db else cand_b
+
+    def _assign_region(self, comp_row: float, comp_col: float, center: np.ndarray) -> str | None:
+        dr = float(comp_row - float(center[0]))
+        dc = float(comp_col - float(center[1]))
+        if abs(dr) < self.min_offset_for_assignment and abs(dc) < self.min_offset_for_assignment:
+            return None
+        if abs(dc) >= abs(dr):
+            return "vx_pos" if dc > 0 else "vx_neg"
+        # row smaller = up on image => vy_pos
+        return "vy_pos" if dr < 0 else "vy_neg"
+
+    def update(
+        self, grid: np.ndarray, dt_s: float = 1.0
+    ) -> tuple[
+        float | None,
+        float | None,
+        float,
+        np.ndarray | None,
+        list[tuple[float, float, float]],
+        list[tuple[float, float, float]],
+        dict[str, tuple[float, float, float]],
+    ]:
+        comps = self._detect_components(grid)
+        center = self._current_center_estimate()
+
+        decay = self._decay_from_half_life(self.memory_half_life_s, dt_s)
+        for k in self.REGION_KEYS:
+            self.region_strength[k] *= decay
+
+        center_obs = self._infer_center_from_components(comps)
+        if center_obs is not None:
+            if self.center is None:
+                self.center = center_obs
+            else:
+                self.center = (1.0 - self.center_alpha) * self.center + self.center_alpha * center_obs
+            center = self._current_center_estimate()
+
+        # For each region, pick the strongest assigned component this frame.
+        best: dict[str, dict[str, float]] = {}
+        for comp in comps:
+            key = self._assign_region(comp["row"], comp["col"], center)
+            if key is None:
+                continue
+            prev = best.get(key)
+            if prev is None or float(comp["mass"]) > float(prev["mass"]):
+                best[key] = comp
+
+        for key, comp in best.items():
+            p = np.array([float(comp["row"]), float(comp["col"])], dtype=float)
+            if self.regions[key] is None:
+                self.regions[key] = p
+            else:
+                self.regions[key] = (1.0 - self.ema_alpha) * self.regions[key] + self.ema_alpha * p
+            self.region_strength[key] = min(1.0, self.region_strength[key] + self.memory_gain)
+
+        # If we did not get a direct center observation, fall back to remembered regions.
+        if center_obs is None:
+            pts = [v for v in self.regions.values() if v is not None]
+            if pts:
+                center_from_regions = np.mean(np.stack(pts, axis=0), axis=0)
+                if self.center is None:
+                    self.center = center_from_regions
+                else:
+                    self.center = (1.0 - self.center_alpha) * self.center + self.center_alpha * center_from_regions
+            center = self._current_center_estimate()
+
+        # Confidence: how many regions are currently remembered with decent strength.
+        strengths = np.array([self.region_strength[k] for k in self.REGION_KEYS], dtype=float)
+        seen_now = min(2, len(best)) / 2.0
+        conf = float(np.clip(0.55 * np.mean(np.sort(strengths)[-2:]) + 0.45 * seen_now, 0.0, 1.0))
+
+        # Update registered memory map (aligned so center lives at mid).
+        if self.memory_map is None:
+            self.memory_map = np.zeros((self.grid_size, self.grid_size), dtype=float)
+        dr = int(round(float(center[0] - self.mid)))
+        dc = int(round(float(center[1] - self.mid)))
+        aligned = _shift2d_int(np.maximum(grid.astype(float), 0.0), -dr, -dc, fill=0.0)
+        # Use a conservative mask to avoid accumulating background.
+        thr_m = float(np.percentile(aligned, self.detect_percentile))
+        mask_m = aligned >= thr_m
+        self.memory_map = np.maximum(self.memory_map * decay, aligned * mask_m.astype(float))
+
+        # Spots live + spots_mem (template coords)
+        spots_live: list[tuple[float, float, float]] = []
+        spots_mem: list[tuple[float, float, float]] = []
+        regions_out: dict[str, tuple[float, float, float]] = {}
+        for k in self.REGION_KEYS:
+            p = self.regions[k]
+            if p is None:
+                continue
+            w = float(self.region_strength[k])
+            spots_live.append((float(p[0]), float(p[1]), w))
+            spots_mem.append((float(p[0] - dr), float(p[1] - dc), w))
+            regions_out[k] = (float(p[0]), float(p[1]), w)
+
+        # Sort for display.
+        spots_live.sort(key=lambda x: float(x[2]), reverse=True)
+        spots_mem.sort(key=lambda x: float(x[2]), reverse=True)
+
+        return float(center[0]), float(center[1]), conf, self.memory_map, spots_live, spots_mem, regions_out
 
 
 def visualize_cross_center_with_memory(
