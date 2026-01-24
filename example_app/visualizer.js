@@ -20,6 +20,20 @@ class Visualizer {
 
         // Canvas contexts cache
         this.canvasContexts = new Map();
+
+        // Audio feedback (Geiger counter)
+        this.audioContext = null;
+        this.audioEnabled = true;
+        this.lastClickTime = 0;
+        this.clickInterval = 1000; // ms between clicks (updated based on distance)
+        this.isOnTarget = false;
+        this.onTargetOscillator = null;
+
+        // Metrics graph history
+        this.intensityHistory = [];
+        this.positionHistoryX = [];
+        this.positionHistoryY = [];
+        this.graphHistoryLength = 100;
     }
 
     /**
@@ -27,6 +41,157 @@ class Visualizer {
      */
     init(layoutManager) {
         this.layoutManager = layoutManager;
+        this.initAudio();
+    }
+
+    /**
+     * Initialize Web Audio API for Geiger counter sounds
+     */
+    initAudio() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            // Audio context starts suspended - will resume on first user interaction
+            if (this.audioContext.state === 'suspended') {
+                const resumeAudio = () => {
+                    this.audioContext.resume();
+                    document.removeEventListener('click', resumeAudio);
+                    document.removeEventListener('keydown', resumeAudio);
+                };
+                document.addEventListener('click', resumeAudio);
+                document.addEventListener('keydown', resumeAudio);
+            }
+        } catch (e) {
+            console.warn('Web Audio API not supported:', e);
+            this.audioEnabled = false;
+        }
+    }
+
+    /**
+     * Play a single Geiger counter click
+     */
+    playClick() {
+        if (!this.audioEnabled || !this.audioContext) return;
+        if (this.audioContext.state === 'suspended') return;
+
+        const now = this.audioContext.currentTime;
+
+        // Create oscillator for click sound
+        const osc = this.audioContext.createOscillator();
+        const gain = this.audioContext.createGain();
+
+        osc.connect(gain);
+        gain.connect(this.audioContext.destination);
+
+        // Short noise-like click (white noise simulation via high frequency)
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(2000 + Math.random() * 1000, now);
+
+        // Very short envelope for click
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialDecayTo = 0.001;
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.02);
+
+        osc.start(now);
+        osc.stop(now + 0.025);
+    }
+
+    /**
+     * Start on-target tone (continuous beep)
+     */
+    startOnTargetTone() {
+        if (!this.audioEnabled || !this.audioContext) return;
+        if (this.audioContext.state === 'suspended') return;
+        if (this.onTargetOscillator) return; // Already playing
+
+        const now = this.audioContext.currentTime;
+
+        // Create oscillator for continuous tone
+        this.onTargetOscillator = this.audioContext.createOscillator();
+        this.onTargetGain = this.audioContext.createGain();
+
+        this.onTargetOscillator.connect(this.onTargetGain);
+        this.onTargetGain.connect(this.audioContext.destination);
+
+        // Pleasant high-pitched confirmation tone
+        this.onTargetOscillator.type = 'sine';
+        this.onTargetOscillator.frequency.setValueAtTime(880, now); // A5
+
+        // Gentle volume with slight modulation
+        this.onTargetGain.gain.setValueAtTime(0.12, now);
+
+        this.onTargetOscillator.start(now);
+    }
+
+    /**
+     * Stop on-target tone
+     */
+    stopOnTargetTone() {
+        if (this.onTargetOscillator) {
+            try {
+                const now = this.audioContext.currentTime;
+                this.onTargetGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+                this.onTargetOscillator.stop(now + 0.06);
+            } catch (e) {
+                // Ignore if already stopped
+            }
+            this.onTargetOscillator = null;
+            this.onTargetGain = null;
+        }
+    }
+
+    /**
+     * Update audio feedback based on distance
+     * @param {number} distance - Distance from center (0 = on target)
+     * @param {boolean} isOnTarget - Whether we're on target
+     */
+    updateAudioFeedback(distance, isOnTarget) {
+        if (!this.audioEnabled) return;
+
+        const now = performance.now();
+
+        // Handle on-target state
+        if (isOnTarget) {
+            if (!this.isOnTarget) {
+                // Just reached target - start tone
+                this.isOnTarget = true;
+                this.startOnTargetTone();
+            }
+            return;
+        } else {
+            if (this.isOnTarget) {
+                // Just left target - stop tone
+                this.isOnTarget = false;
+                this.stopOnTargetTone();
+            }
+        }
+
+        // Geiger counter clicking - faster when closer
+        // distance: 0 (closest) to ~20 (far)
+        // Click interval: 50ms (very close) to 800ms (far)
+        const maxDistance = 20;
+        const normalizedDist = Math.min(1, Math.max(0, distance / maxDistance));
+
+        // Exponential scaling - much faster clicks when close
+        const minInterval = 50;   // Very fast when close
+        const maxInterval = 800;  // Slow when far
+        this.clickInterval = minInterval + (maxInterval - minInterval) * Math.pow(normalizedDist, 1.5);
+
+        // Play click if enough time has passed
+        if (now - this.lastClickTime >= this.clickInterval) {
+            this.playClick();
+            this.lastClickTime = now;
+        }
+    }
+
+    /**
+     * Toggle audio on/off
+     */
+    toggleAudio(enabled) {
+        this.audioEnabled = enabled;
+        if (!enabled) {
+            this.stopOnTargetTone();
+        }
     }
 
     /**
@@ -94,6 +259,11 @@ class Visualizer {
 
         for (const panel of panels) {
             this.updateGuidePanel(panel, guidance);
+        }
+
+        // Update audio feedback (only once, not per panel)
+        if (guidance) {
+            this.updateAudioFeedback(guidance.distance || 0, guidance.isOnTarget || false);
         }
     }
 
@@ -506,7 +676,7 @@ class Visualizer {
     }
 
     /**
-     * Update a single metrics panel
+     * Update a single metrics panel - Enhanced with graphs and status indicators
      */
     updateMetricsPanel(panel, data) {
         const content = panel.content;
@@ -516,16 +686,186 @@ class Visualizer {
             if (el) el.textContent = value;
         };
 
+        const setBar = (selector, percent) => {
+            const el = content.querySelector(`[data-target^="${selector}"]`);
+            if (el) el.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+        };
+
+        const setStatus = (selector, status) => {
+            const el = content.querySelector(`[data-target^="${selector}"]`);
+            if (el) {
+                el.classList.remove('active', 'warning', 'error');
+                if (status) el.classList.add(status);
+            }
+        };
+
+        // Update status indicators
+        setStatus('status-connection', data.connected ? 'active' : 'error');
+        setStatus('status-tracking', data.activeHotspots > 0 ? 'active' : 'warning');
+        setStatus('status-target', data.distance < 3 ? 'active' : (data.distance < 10 ? 'warning' : null));
+
+        // Update primary metrics
         if (data.center) {
             setEl('metric-center', `${data.center.row?.toFixed(1)}, ${data.center.col?.toFixed(1)}`);
         }
-        setEl('metric-confidence', data.confidence ? `${(data.confidence * 100).toFixed(0)}%` : '--%');
-        setEl('metric-distance', data.distance ? `${data.distance.toFixed(1)}` : '--');
-        setEl('metric-vx', data.vx?.toFixed(1) || '--');
-        setEl('metric-vy', data.vy?.toFixed(1) || '--');
+
+        // Distance with bar
+        const distance = data.distance || 0;
+        setEl('metric-distance', distance ? distance.toFixed(1) : '--');
+        setBar('metric-distance-bar', Math.max(0, 100 - (distance / 20) * 100));
+
+        // Confidence with bar
+        const confidence = data.confidence || 0;
+        setEl('metric-confidence', `${(confidence * 100).toFixed(0)}%`);
+        setBar('metric-confidence-bar', confidence * 100);
+
+        // Other metrics
+        setEl('metric-vx', data.vx?.toFixed(2) || '--');
+        setEl('metric-vy', data.vy?.toFixed(2) || '--');
         setEl('metric-active', data.activeHotspots?.toString() || '--');
         setEl('metric-tracked', data.trackedHotspots?.toString() || '--');
+        setEl('metric-clusters', data.clusterCount?.toString() || '--');
         setEl('metric-movement', data.movement || '--');
+
+        // Intensity
+        const intensity = data.totalIntensity || 0;
+        setEl('metric-intensity', intensity.toFixed(2));
+        setBar('metric-intensity-bar', Math.min(100, intensity * 100));
+
+        // Update graph histories
+        this.intensityHistory.push(intensity);
+        if (this.intensityHistory.length > this.graphHistoryLength) {
+            this.intensityHistory.shift();
+        }
+
+        if (data.center) {
+            this.positionHistoryX.push(data.center.col);
+            this.positionHistoryY.push(data.center.row);
+            if (this.positionHistoryX.length > this.graphHistoryLength) {
+                this.positionHistoryX.shift();
+                this.positionHistoryY.shift();
+            }
+        }
+
+        // Render graphs
+        this.renderIntensityGraph(content);
+        this.renderPositionGraph(content);
+    }
+
+    /**
+     * Render intensity history graph
+     */
+    renderIntensityGraph(content) {
+        const canvas = content.querySelector('[data-target^="metrics-graph-intensity"]');
+        if (!canvas) return;
+
+        const ctx = this.getContext(canvas);
+        if (!ctx) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
+
+        // Clear
+        ctx.fillStyle = '#f3f4f6';
+        ctx.fillRect(0, 0, w, h);
+
+        if (this.intensityHistory.length < 2) return;
+
+        // Find max for scaling
+        const max = Math.max(0.1, ...this.intensityHistory);
+
+        // Draw area fill
+        ctx.beginPath();
+        ctx.moveTo(0, h);
+
+        const stepX = w / (this.graphHistoryLength - 1);
+        for (let i = 0; i < this.intensityHistory.length; i++) {
+            const x = i * stepX;
+            const y = h - (this.intensityHistory[i] / max) * h * 0.9;
+            ctx.lineTo(x, y);
+        }
+
+        ctx.lineTo((this.intensityHistory.length - 1) * stepX, h);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(37, 99, 235, 0.2)';
+        ctx.fill();
+
+        // Draw line
+        ctx.beginPath();
+        for (let i = 0; i < this.intensityHistory.length; i++) {
+            const x = i * stepX;
+            const y = h - (this.intensityHistory[i] / max) * h * 0.9;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+
+    /**
+     * Render position history graph (X and Y)
+     */
+    renderPositionGraph(content) {
+        const canvas = content.querySelector('[data-target^="metrics-graph-position"]');
+        if (!canvas) return;
+
+        const ctx = this.getContext(canvas);
+        if (!ctx) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
+
+        // Clear
+        ctx.fillStyle = '#f3f4f6';
+        ctx.fillRect(0, 0, w, h);
+
+        if (this.positionHistoryX.length < 2) return;
+
+        const stepX = w / (this.graphHistoryLength - 1);
+        const center = this.gridSize / 2;
+        const range = this.gridSize / 2;
+
+        // Draw center line
+        ctx.strokeStyle = '#d1d5db';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, h / 2);
+        ctx.lineTo(w, h / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Draw X position (col) - blue
+        ctx.beginPath();
+        for (let i = 0; i < this.positionHistoryX.length; i++) {
+            const x = i * stepX;
+            const y = h / 2 - ((this.positionHistoryX[i] - center) / range) * (h / 2) * 0.9;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Draw Y position (row) - green
+        ctx.beginPath();
+        for (let i = 0; i < this.positionHistoryY.length; i++) {
+            const x = i * stepX;
+            const y = h / 2 - ((this.positionHistoryY[i] - center) / range) * (h / 2) * 0.9;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = '#059669';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Legend
+        ctx.font = '9px Inter, sans-serif';
+        ctx.fillStyle = '#2563eb';
+        ctx.fillText('X', w - 25, 10);
+        ctx.fillStyle = '#059669';
+        ctx.fillText('Y', w - 12, 10);
     }
 
     /**

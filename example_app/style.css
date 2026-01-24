@@ -188,47 +188,127 @@ body {
 /* Horizontal Split (2 side by side) */
 .layout-hsplit {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1px;
-  background: var(--border);
+  grid-template-columns: 1fr 6px 1fr;
+  grid-template-rows: 1fr;
+  gap: 0;
+  background: var(--bg);
 }
+
+.layout-hsplit > .panel-slot:first-child { grid-column: 1; grid-row: 1; }
+.layout-hsplit > .resize-handle { grid-column: 2; grid-row: 1; }
+.layout-hsplit > .panel-slot:last-child { grid-column: 3; grid-row: 1; }
 
 /* Vertical Split (2 stacked) */
 .layout-vsplit {
   display: grid;
-  grid-template-rows: 1fr 1fr;
-  gap: 1px;
-  background: var(--border);
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr 6px 1fr;
+  gap: 0;
+  background: var(--bg);
 }
 
-/* 2x2 Grid */
+.layout-vsplit > .panel-slot:first-child { grid-column: 1; grid-row: 1; }
+.layout-vsplit > .resize-handle { grid-column: 1; grid-row: 2; }
+.layout-vsplit > .panel-slot:last-child { grid-column: 1; grid-row: 3; }
+
+/* 2x2 Grid - panels: TL(1), TR(3), BL(5), BR(7) with handles at 2,4,6 */
 .layout-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
-  gap: 1px;
-  background: var(--border);
+  grid-template-columns: 1fr 6px 1fr;
+  grid-template-rows: 1fr 6px 1fr;
+  gap: 0;
+  background: var(--bg);
 }
+
+.layout-grid > .panel-slot:nth-of-type(1) { grid-column: 1; grid-row: 1; }
+.layout-grid > .panel-slot:nth-of-type(2) { grid-column: 3; grid-row: 1; }
+.layout-grid > .panel-slot:nth-of-type(3) { grid-column: 1; grid-row: 3; }
+.layout-grid > .panel-slot:nth-of-type(4) { grid-column: 3; grid-row: 3; }
+.layout-grid > .resize-handle-vertical { grid-column: 2; grid-row: 1 / 4; }
+.layout-grid > .resize-handle-horizontal { grid-column: 1 / 4; grid-row: 2; }
 
 /* Main + Side (1 large + 2 small) */
 .layout-main-side {
   display: grid;
-  grid-template-columns: 2fr 1fr;
-  grid-template-rows: 1fr 1fr;
-  gap: 1px;
-  background: var(--border);
+  grid-template-columns: 2fr 6px 1fr;
+  grid-template-rows: 1fr 6px 1fr;
+  gap: 0;
+  background: var(--bg);
 }
 
-.layout-main-side .panel-slot:first-child {
-  grid-row: 1 / 3;
+.layout-main-side > .panel-slot:nth-of-type(1) {
+  grid-column: 1;
+  grid-row: 1 / 4;
+}
+.layout-main-side > .resize-handle-vertical {
+  grid-column: 2;
+  grid-row: 1 / 4;
+}
+.layout-main-side > .panel-slot:nth-of-type(2) {
+  grid-column: 3;
+  grid-row: 1;
+}
+.layout-main-side > .resize-handle-horizontal {
+  grid-column: 3;
+  grid-row: 2;
+}
+.layout-main-side > .panel-slot:nth-of-type(3) {
+  grid-column: 3;
+  grid-row: 3;
 }
 
 /* Triple Horizontal */
 .layout-triple {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 1px;
+  grid-template-columns: 1fr 6px 1fr 6px 1fr;
+  grid-template-rows: 1fr;
+  gap: 0;
+  background: var(--bg);
+}
+
+.layout-triple > .panel-slot:nth-of-type(1) { grid-column: 1; grid-row: 1; }
+.layout-triple > .resize-handle:nth-of-type(1) { grid-column: 2; grid-row: 1; }
+.layout-triple > .panel-slot:nth-of-type(2) { grid-column: 3; grid-row: 1; }
+.layout-triple > .resize-handle:nth-of-type(2) { grid-column: 4; grid-row: 1; }
+.layout-triple > .panel-slot:nth-of-type(3) { grid-column: 5; grid-row: 1; }
+
+/* ============================================
+   Resize Handles
+   ============================================ */
+
+.resize-handle {
   background: var(--border);
+  transition: background 150ms;
+  z-index: 5;
+  flex-shrink: 0;
+}
+
+.resize-handle:hover,
+.resize-handle.active {
+  background: var(--blue);
+}
+
+/* Vertical handle (for horizontal resizing - between columns) */
+.resize-handle-vertical {
+  cursor: col-resize;
+}
+
+/* Horizontal handle (for vertical resizing - between rows) */
+.resize-handle-horizontal {
+  cursor: row-resize;
+}
+
+/* Resizing state on body */
+body.resizing {
+  user-select: none;
+}
+
+body.resizing.resize-horizontal {
+  cursor: col-resize;
+}
+
+body.resizing.resize-vertical {
+  cursor: row-resize;
 }
 
 /* ============================================
@@ -284,6 +364,12 @@ body {
    Guide Panel (Direction Arrow)
    ============================================ */
 
+/* Container query for responsive font sizing within panel */
+.panel-guide .panel-content {
+  container-type: size;
+  container-name: guide;
+}
+
 .guide-panel-inner {
   flex: 1;
   display: flex;
@@ -314,7 +400,7 @@ body {
 
 .direction-arrow {
   width: 100%;
-  max-width: 300px;
+  max-width: 400px;
   height: auto;
 }
 
@@ -377,7 +463,8 @@ body {
 }
 
 .instruction-text {
-  font-size: clamp(32px, 8vw, 64px);
+  padding-top: 0.3em;
+  font-size: clamp(28px, 8cqw, 72px);
   font-weight: 900;
   letter-spacing: -0.02em;
   line-height: 1;
@@ -393,9 +480,9 @@ body {
 }
 
 .instruction-detail {
-  margin-top: 4px;
-  font-size: clamp(12px, 2vw, 18px);
-  font-weight: 500;
+  margin-top: 6px;
+  font-size: clamp(14px, 3cqw, 24px);
+  font-weight: 600;
   color: var(--text-muted);
 }
 
@@ -405,7 +492,7 @@ body {
 
 .distance-bar-container {
   width: 100%;
-  max-width: 300px;
+  max-width: 400px;
 }
 
 .distance-bar {
@@ -443,9 +530,9 @@ body {
 .distance-labels {
   display: flex;
   justify-content: space-between;
-  margin-top: 6px;
-  font-size: 10px;
-  font-weight: 600;
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -523,44 +610,220 @@ body {
 }
 
 /* ============================================
-   Metrics Panel
+   Metrics Panel - Enhanced with graphs and colors
    ============================================ */
+
+.panel-metrics .panel-content {
+  container-type: size;
+  container-name: metrics;
+}
 
 .metrics-panel-inner {
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: auto;
+  padding: 8px;
+  gap: 8px;
+  background: #f8f9fa;
 }
 
+/* Status bar at top */
+.metrics-status-bar {
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot-sm {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gray);
+  transition: background 200ms;
+}
+
+.status-indicator.active .status-dot-sm {
+  background: var(--green);
+}
+
+.status-indicator.warning .status-dot-sm {
+  background: var(--amber);
+}
+
+.status-indicator.error .status-dot-sm {
+  background: var(--red);
+}
+
+.status-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+/* Main metrics grid */
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 1px;
-  background: var(--border);
+  gap: 8px;
+}
+
+.metrics-grid-compact {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
 }
 
 .metric {
   padding: 12px;
   background: white;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.metric-primary {
+  padding: 16px;
+}
+
+.metric-compact {
+  padding: 8px 10px;
 }
 
 .metric-label {
+  display: block;
+  font-size: clamp(8px, 2cqw, 11px);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  display: block;
+  font-size: clamp(12px, 3cqw, 16px);
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-value-lg {
+  font-size: clamp(18px, 5cqw, 28px);
+  font-weight: 800;
+  color: var(--blue);
+}
+
+.metric-unit {
+  display: block;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.metric-highlight {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.metric-dim {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* Metric progress bars */
+.metric-bar {
+  margin-top: 8px;
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.metric-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--amber), var(--green));
+  border-radius: 3px;
+  transition: width 150ms ease-out;
+  width: 0%;
+}
+
+.metric-bar-green .metric-bar-fill {
+  background: var(--green);
+}
+
+.metric-bar-blue .metric-bar-fill {
+  background: var(--blue);
+}
+
+/* Graph sections */
+.metrics-graph-section {
+  background: white;
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.metrics-section-title {
   display: block;
   font-size: 10px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  margin-bottom: 2px;
+  margin-bottom: 8px;
 }
 
-.metric-value {
-  display: block;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
+.metrics-graph {
+  width: 100%;
+  height: 50px;
+  background: #f3f4f6;
+  border-radius: 4px;
+}
+
+/* Intensity row */
+.metrics-intensity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.metrics-intensity-row .metric-label {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+
+.intensity-bar-container {
+  flex: 1;
+  height: 12px;
+  background: linear-gradient(90deg, #1a1a2e 0%, #ff8800 50%, #fcff52 100%);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.intensity-bar {
+  height: 100%;
+  background: rgba(255,255,255,0.3);
+  width: 0%;
+  transition: width 100ms ease-out;
+}
+
+.metrics-intensity-row .metric-value {
+  flex-shrink: 0;
+  min-width: 40px;
+  text-align: right;
 }
 
 /* ============================================
@@ -678,6 +941,228 @@ body {
 
 .btn-preset:hover {
   background: #fde68a;
+}
+
+.btn-audio {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.btn-audio:hover {
+  background: #bfdbfe;
+}
+
+.btn-audio.muted {
+  background: #f3f4f6;
+  color: var(--text-muted);
+}
+
+/* ============================================
+   Freeform Layout
+   ============================================ */
+
+.layout-freeform {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: #e5e7eb;
+}
+
+.freeform-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: white;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.freeform-toolbar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.freeform-add-btn {
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: white;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 150ms;
+}
+
+.freeform-add-btn:hover {
+  background: var(--blue);
+  color: white;
+  border-color: var(--blue);
+}
+
+.freeform-windows-area {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, #d1d5db 1px, transparent 1px),
+    linear-gradient(#d1d5db 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.freeform-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15), 0 1px 3px rgba(0,0,0,0.1);
+  min-width: 200px;
+  min-height: 150px;
+  z-index: 10;
+  overflow: hidden;
+}
+
+.freeform-window:focus-within {
+  box-shadow: 0 8px 24px rgba(0,0,0,0.2), 0 2px 6px rgba(0,0,0,0.1);
+}
+
+.freeform-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #f3f4f6;
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  flex-shrink: 0;
+}
+
+.freeform-window-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  user-select: none;
+}
+
+.freeform-window-close {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 150ms;
+}
+
+.freeform-window-close:hover {
+  background: var(--red);
+  color: white;
+}
+
+.freeform-window .panel-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.freeform-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: se-resize;
+  background:
+    linear-gradient(135deg, transparent 50%, var(--border) 50%, var(--border) 60%, transparent 60%),
+    linear-gradient(135deg, transparent 70%, var(--border) 70%, var(--border) 80%, transparent 80%);
+}
+
+.freeform-resize-handle:hover {
+  background:
+    linear-gradient(135deg, transparent 50%, var(--blue) 50%, var(--blue) 60%, transparent 60%),
+    linear-gradient(135deg, transparent 70%, var(--blue) 70%, var(--blue) 80%, transparent 80%);
+}
+
+/* ============================================
+   Container Query Scaling for All Panels
+   ============================================ */
+
+/* Global map panel scaling */
+.panel-global-map .panel-content {
+  container-type: size;
+  container-name: globalmap;
+}
+
+.global-map-canvas {
+  width: 100%;
+  max-width: min(400px, 90cqmin);
+  aspect-ratio: 1;
+  background: #1a1a2e;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.map-info {
+  display: flex;
+  gap: clamp(8px, 3cqw, 20px);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.map-label {
+  font-size: clamp(8px, 2cqw, 10px);
+}
+
+.map-value {
+  font-size: clamp(10px, 2.5cqw, 14px);
+}
+
+/* Live/Memory heatmap panel scaling */
+.panel-live .panel-content,
+.panel-memory .panel-content {
+  container-type: size;
+  container-name: heatmap;
+}
+
+.heatmap-canvas {
+  width: 100%;
+  max-width: min(320px, 85cqmin);
+  aspect-ratio: 1;
+  border-radius: 4px;
+}
+
+/* Guide panel additional scaling */
+.arrow-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 55%;
+  width: 100%;
+}
+
+.direction-arrow {
+  width: 100%;
+  max-width: min(400px, 70cqmin);
+  height: auto;
+}
+
+.distance-bar-container {
+  width: 100%;
+  max-width: min(400px, 80cqw);
+}
+
+.distance-labels {
+  font-size: clamp(10px, 2.5cqw, 14px);
 }
 
 /* ============================================

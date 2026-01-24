@@ -522,7 +522,57 @@ class ClusterTracker {
     }
 
     /**
+     * Compute center of mass using SQUARED intensity weighting
+     * IDENTICAL to hotspot_tracker.py compute_velocity() logic
+     *
+     * Uses weighted_grid = grid ** 2 to exaggerate bright hotspots
+     * Center is at (15.5, 15.5) for a 32x32 grid
+     */
+    computeSquaredIntensityCOM(normalizedGrid) {
+        const gridSize = this.gridSize;
+        const gridCenter = (gridSize - 1) / 2;  // 15.5 for 32x32
+
+        // Square the intensity values (key insight from hotspot_tracker.py)
+        // This exaggerates bright hotspots and makes COM pull more strongly toward them
+        let totalIntensity = 0;
+        let weightedRow = 0;
+        let weightedCol = 0;
+
+        for (let row = 0; row < gridSize; row++) {
+            for (let col = 0; col < gridSize; col++) {
+                const val = normalizedGrid[row][col];
+                const squaredVal = val * val;  // ** 2 weighting
+                weightedRow += row * squaredVal;
+                weightedCol += col * squaredVal;
+                totalIntensity += squaredVal;
+            }
+        }
+
+        if (totalIntensity > 0.01) {
+            const avgRow = weightedRow / totalIntensity;
+            const avgCol = weightedCol / totalIntensity;
+
+            // Convert to velocity-like values (matching hotspot_tracker.py)
+            // raw_vx = (avg_col - 15.5) / 15.5
+            // raw_vy = -(avg_row - 15.5) / 15.5  (negative because row 0 is top)
+            const rawVx = (avgCol - gridCenter) / gridCenter;
+            const rawVy = -(avgRow - gridCenter) / gridCenter;
+
+            return {
+                row: avgRow,
+                col: avgCol,
+                vx: rawVx,
+                vy: rawVy,
+                totalIntensity
+            };
+        }
+
+        return null;
+    }
+
+    /**
      * Main entry point: compute cluster center from normalized grid
+     * Now uses SQUARED intensity weighted center of mass (matching hotspot_tracker.py)
      */
     computeClusterCenter(normalizedGrid) {
         // Update hotspot memory
@@ -537,36 +587,53 @@ class ClusterTracker {
         // Update legacy peakPositions for visualizer compatibility
         this.updatePeakPositions();
 
-        // Find primary cluster (strongest/most confident)
-        const primaryCluster = this.getPrimaryCluster();
+        // STEP 1: Compute global squared-intensity weighted COM
+        // This is IDENTICAL to hotspot_tracker.py logic
+        const squaredCOM = this.computeSquaredIntensityCOM(normalizedGrid);
 
-        if (!primaryCluster) {
+        if (!squaredCOM) {
             this.trackedCenter = null;
             return null;
         }
 
-        // Use the cluster's stable centroid
-        const center = primaryCluster.centroid;
+        // STEP 2: Find primary cluster near the squared COM
+        // This combines the Python approach with our cluster tracking
+        const primaryCluster = this.getPrimaryClusterNearCOM(squaredCOM);
 
-        // Additional smoothing for tracked center
+        // STEP 3: If we have a cluster, use its peaks to refine the center
+        // but anchor it to the squared COM for stability
+        let finalRow = squaredCOM.row;
+        let finalCol = squaredCOM.col;
+
+        if (primaryCluster && primaryCluster.peaks.length > 0) {
+            // Blend cluster centroid with squared COM (cluster provides structure, COM provides stability)
+            const clusterWeight = 0.3;  // Prefer squared COM for stability
+            finalRow = clusterWeight * primaryCluster.centroid.row + (1 - clusterWeight) * squaredCOM.row;
+            finalCol = clusterWeight * primaryCluster.centroid.col + (1 - clusterWeight) * squaredCOM.col;
+        }
+
+        // STEP 4: Apply smoothing to tracked center
         if (this.trackedCenter === null) {
-            this.trackedCenter = { ...center };
+            this.trackedCenter = { row: finalRow, col: finalCol };
         } else {
             this.trackedCenter.row =
-                this.centerSmoothing * center.row +
+                this.centerSmoothing * finalRow +
                 (1 - this.centerSmoothing) * this.trackedCenter.row;
             this.trackedCenter.col =
-                this.centerSmoothing * center.col +
+                this.centerSmoothing * finalCol +
                 (1 - this.centerSmoothing) * this.trackedCenter.col;
         }
 
         return {
             row: this.trackedCenter.row,
             col: this.trackedCenter.col,
-            peakCount: primaryCluster.peaks.length,
-            activePeaks: primaryCluster.getActivePeakCount(),
-            clusterId: primaryCluster.id,
-            clusterConfidence: primaryCluster.confidence
+            vx: squaredCOM.vx,
+            vy: squaredCOM.vy,
+            peakCount: primaryCluster ? primaryCluster.peaks.length : 0,
+            activePeaks: primaryCluster ? primaryCluster.getActivePeakCount() : 0,
+            clusterId: primaryCluster ? primaryCluster.id : null,
+            clusterConfidence: primaryCluster ? primaryCluster.confidence : 0,
+            totalIntensity: squaredCOM.totalIntensity
         };
     }
 
@@ -587,6 +654,44 @@ class ClusterTracker {
 
             return score > bestScore ? cluster : best;
         }, null);
+    }
+
+    /**
+     * Get the primary cluster near the squared-intensity COM
+     * Prefers clusters close to the computed center of mass
+     */
+    getPrimaryClusterNearCOM(squaredCOM) {
+        if (this.clusters.length === 0) return null;
+
+        // Score clusters by proximity to COM and strength
+        let bestCluster = null;
+        let bestScore = -Infinity;
+
+        for (const cluster of this.clusters) {
+            // Distance from cluster centroid to squared COM
+            const dist = Math.sqrt(
+                Math.pow(cluster.centroid.row - squaredCOM.row, 2) +
+                Math.pow(cluster.centroid.col - squaredCOM.col, 2)
+            );
+
+            // Proximity factor: closer to COM = higher score
+            const proximityFactor = Math.exp(-dist / 8);  // Decay over ~8 grid units
+
+            // Strength factor
+            const strengthFactor = cluster.confidence *
+                                   cluster.getTotalIntensity() *
+                                   Math.sqrt(cluster.peaks.length);
+
+            // Combined score prioritizes clusters near the COM
+            const score = proximityFactor * strengthFactor;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestCluster = cluster;
+            }
+        }
+
+        return bestCluster;
     }
 
     /**
@@ -618,6 +723,14 @@ class ClusterTracker {
 
     /**
      * Infer array movement from center movement
+     *
+     * NOTE: For interactive mode (surgeon moving array), this is less useful
+     * because the surgeon IS the one moving the array. This is mainly for:
+     * 1. Global map visualization (showing trajectory)
+     * 2. Potentially detecting unintended drift
+     *
+     * The approach: if neural activity center moves left on the grid,
+     * the array must have moved right in brain space.
      */
     inferArrayMovement() {
         if (!this.trackedCenter || !this.prevCenter) {
@@ -629,13 +742,21 @@ class ClusterTracker {
         const dRow = this.trackedCenter.row - this.prevCenter.row;
         const dCol = this.trackedCenter.col - this.prevCenter.col;
 
+        // Only consider significant movements (reduces noise)
+        const movementMagnitude = Math.sqrt(dRow * dRow + dCol * dCol);
+        if (movementMagnitude < 0.5) {
+            // Too small to be meaningful movement
+            this.prevCenter = { ...this.trackedCenter };
+            return { dx: 0, dy: 0, confidence: 0 };
+        }
+
         // Store movement
         this.movementHistory.push({ dRow, dCol, time: Date.now() });
         while (this.movementHistory.length > this.movementHistoryLength) {
             this.movementHistory.shift();
         }
 
-        // Average recent movements
+        // Average recent movements (smoothing)
         let avgDRow = 0, avgDCol = 0;
         for (const m of this.movementHistory) {
             avgDRow += m.dRow;
@@ -647,13 +768,13 @@ class ClusterTracker {
         // Update previous center
         this.prevCenter = { ...this.trackedCenter };
 
-        // Invert: cluster moving left = array moving right
+        // Invert: cluster moving left on grid = array moving right in brain space
         const magnitude = Math.sqrt(avgDRow * avgDRow + avgDCol * avgDCol);
 
         return {
             dx: -avgDCol,
             dy: -avgDRow,
-            confidence: Math.min(1, magnitude * 2)
+            confidence: Math.min(1, magnitude * 0.5)  // Reduced confidence scaling
         };
     }
 
@@ -676,25 +797,75 @@ class ClusterTracker {
     }
 
     /**
-     * Get guidance direction for surgeon
+     * Get guidance direction for surgeon - SIMPLIFIED for interactive mode
+     *
+     * This is the key method for the OR display. It tells the surgeon
+     * which way to move the array to center the neural activity.
+     *
+     * The approach is simple and robust:
+     * 1. Use the squared-intensity weighted center of mass (already computed)
+     * 2. Arrow points TOWARD where activity is (surgeon moves array that direction)
+     * 3. When activity is centered, show "on target"
      */
     getGuidanceDirection() {
         const dist = this.getDistanceToCenter();
         if (!dist) return null;
 
-        // To center the cluster, move array OPPOSITE to where cluster is
-        const moveX = -dist.dx;
-        const moveY = -dist.dy;
+        // Arrow points TOWARD activity (same direction as offset from center)
+        // If activity is at row=20, col=25 (lower-right of center),
+        // arrow points lower-right, telling surgeon to move array that way
+        const moveX = dist.dx;   // Point toward activity
+        const moveY = dist.dy;   // Point toward activity
 
+        // Angle for arrow: standard math angle (0=right, 90=up)
+        // Note: moveY is positive downward (row increases), so negate for screen coords
         const angle = Math.atan2(-moveY, moveX) * 180 / Math.PI;
-        const magnitude = dist.distance / 16;
+
+        // Magnitude: normalized 0-1 based on how far from center
+        // At 16 grid units (half the grid), magnitude = 1
+        const magnitude = Math.min(1, dist.distance / 16);
+
+        // On target threshold: within ~3 grid units of center (~1mm)
+        const onTargetThreshold = 3;
 
         return {
             angle,
-            magnitude: Math.min(1, magnitude),
+            magnitude,
             distance: dist.distance,
             distanceMm: dist.distanceMm,
-            isOnTarget: dist.distance < 3
+            isOnTarget: dist.distance < onTargetThreshold,
+            // Additional info for display
+            activityRow: this.trackedCenter.row,
+            activityCol: this.trackedCenter.col,
+            arrayCenter: (this.gridSize - 1) / 2
+        };
+    }
+
+    /**
+     * ALTERNATIVE: Get guidance using raw squared-COM (bypass cluster tracking)
+     * This is more responsive but less stable. Use for fast feedback.
+     */
+    getDirectGuidance(normalizedGrid) {
+        const com = this.computeSquaredIntensityCOM(normalizedGrid);
+        if (!com) return null;
+
+        const arrayCenter = (this.gridSize - 1) / 2;
+        const dx = com.col - arrayCenter;
+        const dy = com.row - arrayCenter;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        // Arrow points toward activity
+        const angle = Math.atan2(-dy, dx) * 180 / Math.PI;
+
+        return {
+            angle,
+            magnitude: Math.min(1, distance / 16),
+            distance,
+            distanceMm: distance * 0.3,
+            isOnTarget: distance < 3,
+            // Raw velocity from COM (useful for other purposes)
+            vx: com.vx,
+            vy: com.vy
         };
     }
 

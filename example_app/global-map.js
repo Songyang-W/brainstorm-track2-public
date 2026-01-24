@@ -1,17 +1,20 @@
 /**
- * Global Brain Map Module v2
+ * Global Brain Map Module v3
  *
  * Maintains a persistent map of accumulated neural activity as the array moves.
  * Now uses ClusterEntity integration for better hotspot anchoring in global coordinates.
  *
- * Key improvements:
+ * Key improvements v3:
+ * - Supports MULTIPLE clusters as anchor points
  * - Anchors entire cluster entities (not just individual peaks)
  * - Maintains cluster identity across movements
- * - More stable global hotspot positions
+ * - Remembers off hotspots within clusters for structure preservation
+ * - Uses squared-intensity weighted COM from cluster-tracker.js
  */
 
 /**
  * Global cluster representation
+ * Remembers ALL peaks (active and inactive) for structure preservation
  */
 class GlobalCluster {
     constructor(id, localCluster, arrayPosition, localGridSize) {
@@ -25,13 +28,19 @@ class GlobalCluster {
             y: arrayPosition.y - halfSize + localCluster.centroid.row
         };
 
+        // Smoothed centroid for extra stability
+        this.smoothedCentroid = { ...this.centroid };
+
         // Store anchored peaks in global coordinates
+        // IMPORTANT: Store ALL peaks including inactive ones for structure memory
         this.globalPeaks = localCluster.peaks.map(peak => ({
             x: arrayPosition.x - halfSize + peak.col,
             y: arrayPosition.y - halfSize + peak.row,
             intensity: peak.intensity,
             maxIntensity: peak.maxIntensity,
-            active: peak.active
+            active: peak.active,
+            lastActive: peak.lastActive || Date.now(),
+            activationCount: peak.activationCount || 1
         }));
 
         this.confidence = localCluster.confidence;
@@ -40,21 +49,36 @@ class GlobalCluster {
         this.totalIntensity = localCluster.getTotalIntensity();
         this.peakCount = localCluster.peaks.length;
         this.activePeakCount = localCluster.getActivePeakCount();
+
+        // Track structure stability (how consistent the peak arrangement is)
+        this.structureStability = 0.5;
     }
 
     /**
      * Update with new local cluster observation
+     * Preserves off-hotspot positions for structure memory
      */
     update(localCluster, arrayPosition, localGridSize) {
         const halfSize = localGridSize / 2;
 
-        // Smoothly update centroid (strong anchoring)
+        // Compute new centroid position
         const newX = arrayPosition.x - halfSize + localCluster.centroid.col;
         const newY = arrayPosition.y - halfSize + localCluster.centroid.row;
 
-        const smoothing = 0.15;  // Very smooth for stability
-        this.centroid.x = smoothing * newX + (1 - smoothing) * this.centroid.x;
-        this.centroid.y = smoothing * newY + (1 - smoothing) * this.centroid.y;
+        // Use VERY smooth updates for centroid stability (key for anchoring)
+        const centroidSmoothing = 0.1;
+        this.centroid.x = centroidSmoothing * newX + (1 - centroidSmoothing) * this.centroid.x;
+        this.centroid.y = centroidSmoothing * newY + (1 - centroidSmoothing) * this.centroid.y;
+
+        // Even smoother for the smoothed centroid
+        this.smoothedCentroid.x = 0.05 * newX + 0.95 * this.smoothedCentroid.x;
+        this.smoothedCentroid.y = 0.05 * newY + 0.95 * this.smoothedCentroid.y;
+
+        // Peak position smoothing
+        const peakSmoothing = 0.15;
+
+        // Track which global peaks got matched
+        const matchedGlobalPeaks = new Set();
 
         // Update or add global peaks
         for (const localPeak of localCluster.peaks) {
@@ -63,52 +87,94 @@ class GlobalCluster {
 
             // Find matching global peak
             let matched = false;
-            for (const globalPeak of this.globalPeaks) {
+            let bestMatchIdx = -1;
+            let bestMatchDist = Infinity;
+
+            for (let i = 0; i < this.globalPeaks.length; i++) {
+                const globalPeak = this.globalPeaks[i];
                 const dist = Math.sqrt(
                     Math.pow(globalX - globalPeak.x, 2) +
                     Math.pow(globalY - globalPeak.y, 2)
                 );
 
-                if (dist < 4) {
-                    // Update with smoothing
-                    globalPeak.x = smoothing * globalX + (1 - smoothing) * globalPeak.x;
-                    globalPeak.y = smoothing * globalY + (1 - smoothing) * globalPeak.y;
-                    globalPeak.intensity = localPeak.intensity;
-                    globalPeak.maxIntensity = Math.max(globalPeak.maxIntensity, localPeak.maxIntensity);
-                    globalPeak.active = localPeak.active;
-                    matched = true;
-                    break;
+                if (dist < 5 && dist < bestMatchDist) {
+                    bestMatchDist = dist;
+                    bestMatchIdx = i;
                 }
             }
 
-            if (!matched && localPeak.intensity > 0.3) {
+            if (bestMatchIdx >= 0) {
+                const globalPeak = this.globalPeaks[bestMatchIdx];
+                // Update with smoothing (preserves position even when temporarily off)
+                globalPeak.x = peakSmoothing * globalX + (1 - peakSmoothing) * globalPeak.x;
+                globalPeak.y = peakSmoothing * globalY + (1 - peakSmoothing) * globalPeak.y;
+                globalPeak.intensity = localPeak.intensity;
+                globalPeak.maxIntensity = Math.max(globalPeak.maxIntensity, localPeak.maxIntensity);
+                globalPeak.active = localPeak.active;
+                globalPeak.lastActive = localPeak.active ? Date.now() : globalPeak.lastActive;
+                globalPeak.activationCount = (globalPeak.activationCount || 1) + (localPeak.active ? 1 : 0);
+                matchedGlobalPeaks.add(bestMatchIdx);
+                matched = true;
+            }
+
+            // Add new peaks with lower threshold to capture structure
+            if (!matched && localPeak.intensity > 0.2) {
                 this.globalPeaks.push({
                     x: globalX,
                     y: globalY,
                     intensity: localPeak.intensity,
                     maxIntensity: localPeak.maxIntensity,
-                    active: localPeak.active
+                    active: localPeak.active,
+                    lastActive: Date.now(),
+                    activationCount: 1
                 });
             }
         }
 
+        // Decay unmatched peaks but DON'T remove them quickly (preserve structure)
+        for (let i = 0; i < this.globalPeaks.length; i++) {
+            if (!matchedGlobalPeaks.has(i)) {
+                const peak = this.globalPeaks[i];
+                peak.active = false;
+                peak.intensity *= 0.98;  // Slow decay to remember position
+            }
+        }
+
+        // Update cluster metrics
         this.confidence = Math.max(this.confidence, localCluster.confidence);
         this.lastSeen = Date.now();
         this.totalIntensity = localCluster.getTotalIntensity();
         this.peakCount = localCluster.peaks.length;
         this.activePeakCount = localCluster.getActivePeakCount();
+
+        // Update structure stability (consistent peak count = stable structure)
+        const expectedPeaks = this.globalPeaks.length;
+        const observedActive = localCluster.getActivePeakCount();
+        const stabilityDelta = observedActive / Math.max(1, expectedPeaks);
+        this.structureStability = 0.9 * this.structureStability + 0.1 * stabilityDelta;
     }
 
     /**
      * Decay when not observed
+     * Preserves structure by keeping peak POSITIONS even when intensity fades
      */
     decay() {
         this.confidence *= 0.995;
         for (const peak of this.globalPeaks) {
             peak.intensity *= 0.99;
+            peak.active = false;
         }
-        // Remove very weak peaks
-        this.globalPeaks = this.globalPeaks.filter(p => p.intensity > 0.05);
+        // Only remove peaks that have been inactive for a long time AND are very weak
+        // This preserves cluster structure even when parts turn off temporarily
+        const now = Date.now();
+        this.globalPeaks = this.globalPeaks.filter(p => {
+            const age = now - (p.lastActive || now);
+            // Keep if: recently active, high max intensity history, or frequently activated
+            return p.intensity > 0.03 ||
+                   age < 15000 ||
+                   p.maxIntensity > 0.5 ||
+                   (p.activationCount || 1) > 5;
+        });
     }
 
     /**

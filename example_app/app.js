@@ -158,6 +158,31 @@ class ArrayPlacementApp {
                 this.resetState();
             });
         }
+
+        // Audio toggle button
+        const audioBtn = document.getElementById('audio-btn');
+        if (audioBtn) {
+            audioBtn.addEventListener('click', () => {
+                const isMuted = audioBtn.classList.toggle('muted');
+                audioBtn.textContent = isMuted ? 'Sound: OFF' : 'Sound: ON';
+                if (this.visualizer) {
+                    this.visualizer.toggleAudio(!isMuted);
+                }
+            });
+        }
+
+        // Prevent arrow keys from navigating DOM elements
+        // This stops Chrome from moving focus between elements when arrow keys are pressed
+        document.addEventListener('keydown', (e) => {
+            const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+            if (arrowKeys.includes(e.key)) {
+                // Only prevent if not in an input/textarea
+                const tag = e.target.tagName.toLowerCase();
+                if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+                    e.preventDefault();
+                }
+            }
+        });
     }
 
     /**
@@ -382,6 +407,9 @@ class ArrayPlacementApp {
             vy: this.cursorVelocity.vy,
             activeHotspots: clusterCenter?.activePeaks || 0,
             trackedHotspots: this.clusterTracker.peakPositions.length,
+            clusterCount: this.clusterTracker.getClusters().length,
+            totalIntensity: clusterCenter?.totalIntensity || 0,
+            connected: this.isConnected,
             movement: movement.confidence > 0.1 ?
                 `${movement.dx.toFixed(2)}, ${movement.dy.toFixed(2)}` : 'stable'
         });
