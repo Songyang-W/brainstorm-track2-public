@@ -1,6 +1,6 @@
 /*
- * Array Placement Guide - Clean Surgeon UI
- * ONE JOB: Tell the surgeon which way to move
+ * Array Placement Guide - Modular Surgeon UI
+ * Flexible layouts: tabs, splits, grids
  * Readable from 6+ feet, zero cognitive load
  */
 
@@ -10,6 +10,7 @@
   --surface: #ffffff;
   --text: #1a1a2e;
   --text-muted: #6b7280;
+  --border: #e5e7eb;
 
   /* State colors */
   --blue: #2563eb;
@@ -60,10 +61,10 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 20px;
+  padding: 8px 16px;
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(8px);
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--border);
   z-index: 10;
   flex-shrink: 0;
 }
@@ -75,8 +76,8 @@ body {
 }
 
 .status-dot {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--gray);
   transition: background 200ms;
@@ -97,7 +98,7 @@ body {
 }
 
 .status-text {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
 }
@@ -105,101 +106,221 @@ body {
 .status-center {
   display: flex;
   gap: 4px;
-  background: #f3f4f6;
-  padding: 4px;
-  border-radius: 10px;
-}
-
-.tab-btn {
-  padding: 8px 16px;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: all 150ms;
-}
-
-.tab-btn:hover {
-  color: var(--text);
-}
-
-.tab-btn.active {
-  background: white;
-  color: var(--text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .status-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
 .time-display,
 .fps-display {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
 /* ============================================
-   Tab Content
+   Layout Selector
    ============================================ */
 
-.tab-content {
-  flex: 1;
-  display: none;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  gap: 20px;
-  background: var(--surface);
-  overflow: auto;
+.layout-selector {
+  display: flex;
+  gap: 2px;
+  background: #f3f4f6;
+  padding: 3px;
+  border-radius: 8px;
 }
 
-.tab-content.active {
+.layout-btn {
+  width: 32px;
+  height: 28px;
   display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 150ms;
+  font-size: 14px;
+}
+
+.layout-btn:hover {
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--text);
+}
+
+.layout-btn.active {
+  background: white;
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.layout-icon {
+  font-size: 16px;
+  line-height: 1;
 }
 
 /* ============================================
-   Main Tab - Surgeon View
+   Layout Container - Flexible Layouts
    ============================================ */
 
-/* Acquiring state */
-.app.acquiring #tab-main {
-  background: var(--amber-light);
+.layout-container {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  background: var(--bg);
 }
 
-/* On target state */
-.app.on-target #tab-main {
+/* Tabs Layout (single view) */
+.layout-tabs {
+  display: flex;
+}
+
+.layout-tabs .panel-slot {
+  flex: 1;
+}
+
+/* Horizontal Split (2 side by side) */
+.layout-hsplit {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+
+/* Vertical Split (2 stacked) */
+.layout-vsplit {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+
+/* 2x2 Grid */
+.layout-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+
+/* Main + Side (1 large + 2 small) */
+.layout-main-side {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+
+.layout-main-side .panel-slot:first-child {
+  grid-row: 1 / 3;
+}
+
+/* Triple Horizontal */
+.layout-triple {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+
+/* ============================================
+   Panel Slot
+   ============================================ */
+
+.panel-slot {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-header {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  background: #f9fafb;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.view-selector {
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  outline: none;
+}
+
+.view-selector:focus {
+  border-color: var(--blue);
+}
+
+.panel-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ============================================
+   Guide Panel (Direction Arrow)
+   ============================================ */
+
+.guide-panel-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  gap: 16px;
+  background: var(--surface);
+}
+
+.panel-guide.on-target .guide-panel-inner {
   background: var(--green-light);
 }
 
-/* Giant Direction Arrow */
+.panel-guide.acquiring .guide-panel-inner {
+  background: var(--amber-light);
+}
+
 .arrow-container {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  max-height: 50vh;
+  max-height: 50%;
   width: 100%;
 }
 
 .direction-arrow {
   width: 100%;
-  max-width: 400px;
+  max-width: 300px;
   height: auto;
 }
 
 .arrow-bg {
   fill: var(--bg);
-  stroke: #e5e7eb;
+  stroke: var(--border);
   stroke-width: 2;
 }
 
@@ -210,7 +331,7 @@ body {
   stroke-dasharray: 8 4;
 }
 
-.app.on-target .target-zone {
+.panel-guide.on-target .target-zone {
   fill: var(--green);
   stroke: var(--green);
   stroke-dasharray: none;
@@ -218,7 +339,7 @@ body {
 
 .arrow-shaft {
   stroke: var(--blue);
-  stroke-width: 12;
+  stroke-width: 10;
   stroke-linecap: round;
 }
 
@@ -226,7 +347,7 @@ body {
   fill: var(--blue);
 }
 
-.app.on-target .arrow-group {
+.panel-guide.on-target .arrow-group {
   display: none;
 }
 
@@ -234,7 +355,7 @@ body {
   display: none;
 }
 
-.app.on-target .check-group {
+.panel-guide.on-target .check-group {
   display: block;
 }
 
@@ -245,55 +366,52 @@ body {
 .check-mark {
   fill: none;
   stroke: white;
-  stroke-width: 8;
+  stroke-width: 6;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-/* Giant Instruction Text */
 .instruction-area {
   text-align: center;
-  padding: 0 20px;
+  padding: 0 16px;
 }
 
 .instruction-text {
-  font-size: clamp(48px, 12vw, 96px);
+  font-size: clamp(32px, 8vw, 64px);
   font-weight: 900;
   letter-spacing: -0.02em;
   line-height: 1;
   color: var(--text);
 }
 
-.app.on-target .instruction-text {
+.panel-guide.on-target .instruction-text {
   color: var(--green);
 }
 
-.app.acquiring .instruction-text {
+.panel-guide.acquiring .instruction-text {
   color: var(--amber);
 }
 
 .instruction-detail {
-  margin-top: 8px;
-  font-size: clamp(16px, 3vw, 24px);
+  margin-top: 4px;
+  font-size: clamp(12px, 2vw, 18px);
   font-weight: 500;
   color: var(--text-muted);
 }
 
-.app.on-target .instruction-detail {
+.panel-guide.on-target .instruction-detail {
   color: var(--green);
 }
 
-/* Distance Bar */
 .distance-bar-container {
   width: 100%;
-  max-width: 400px;
-  padding: 0 20px;
+  max-width: 300px;
 }
 
 .distance-bar {
-  height: 16px;
+  height: 12px;
   background: linear-gradient(to right, var(--amber) 0%, var(--green) 100%);
-  border-radius: 8px;
+  border-radius: 6px;
   position: relative;
   overflow: visible;
 }
@@ -304,7 +422,7 @@ body {
   top: 0;
   height: 100%;
   background: rgba(0, 0, 0, 0.15);
-  border-radius: 8px 0 0 8px;
+  border-radius: 6px 0 0 6px;
   transition: width 150ms ease-out;
 }
 
@@ -313,20 +431,20 @@ body {
   top: 50%;
   left: 0%;
   transform: translate(-50%, -50%);
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   background: white;
-  border: 3px solid var(--text);
+  border: 2px solid var(--text);
   border-radius: 50%;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
   transition: left 150ms ease-out;
 }
 
 .distance-labels {
   display: flex;
   justify-content: space-between;
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 6px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -334,30 +452,31 @@ body {
 }
 
 /* ============================================
-   Global Map Tab
+   Global Map Panel
    ============================================ */
 
-.map-container {
+.map-panel-inner {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  width: 100%;
-  max-width: 600px;
+  justify-content: center;
+  padding: 12px;
+  gap: 12px;
 }
 
-#global-map-canvas {
+.global-map-canvas {
   width: 100%;
-  max-width: 500px;
+  max-width: 400px;
   aspect-ratio: 1;
   background: #1a1a2e;
-  border-radius: 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .map-info {
   display: flex;
-  gap: 24px;
+  gap: 20px;
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -368,7 +487,7 @@ body {
 
 .map-label {
   display: block;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -377,83 +496,52 @@ body {
 
 .map-value {
   display: block;
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
-.map-legend {
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-  justify-content: center;
-}
+/* ============================================
+   Heatmap Panels (Live & Memory)
+   ============================================ */
 
-.legend-item {
+.heatmap-panel-inner {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-muted);
+  justify-content: center;
+  padding: 12px;
+  background: #1a1a2e;
 }
 
-.legend-color {
-  width: 16px;
-  height: 16px;
+.heatmap-canvas {
+  width: 100%;
+  max-width: 320px;
+  aspect-ratio: 1;
   border-radius: 4px;
 }
 
 /* ============================================
-   Debug Tab
+   Metrics Panel
    ============================================ */
 
-.debug-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 16px;
-  width: 100%;
-  max-width: 1200px;
-  align-items: start;
-}
-
-.debug-card {
-  background: white;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  overflow: hidden;
-}
-
-.debug-card-header {
-  padding: 12px 16px;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  border-bottom: 1px solid #e5e7eb;
-  background: #f9fafb;
-}
-
-.debug-card canvas {
-  width: 100%;
-  display: block;
-  background: #1a1a2e;
-}
-
-.debug-metrics {
-  padding: 0;
+.metrics-panel-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
 }
 
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 1px;
-  background: #e5e7eb;
+  background: var(--border);
 }
 
 .metric {
-  padding: 12px 16px;
+  padding: 12px;
   background: white;
 }
 
@@ -464,12 +552,12 @@ body {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .metric-value {
   display: block;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -485,7 +573,7 @@ body {
   left: 0;
   right: 0;
   background: white;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--border);
   z-index: 10;
 }
 
@@ -493,10 +581,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 12px;
+  gap: 6px;
+  padding: 10px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
   user-select: none;
@@ -512,7 +600,7 @@ body {
 
 .controls-content {
   display: none;
-  padding: 0 20px 20px;
+  padding: 0 16px 16px;
 }
 
 .controls-panel.expanded .controls-content {
@@ -522,18 +610,18 @@ body {
 .control-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
 .ws-input {
   flex: 1;
-  min-width: 200px;
-  padding: 10px 14px;
+  min-width: 180px;
+  padding: 8px 12px;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   border: 1px solid #d1d5db;
-  border-radius: 8px;
+  border-radius: 6px;
   outline: none;
   transition: border-color 150ms;
 }
@@ -543,12 +631,12 @@ body {
 }
 
 .btn {
-  padding: 10px 20px;
+  padding: 8px 16px;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   cursor: pointer;
   transition: background 100ms, transform 100ms;
 }
@@ -596,10 +684,10 @@ body {
    Responsive
    ============================================ */
 
-@media (max-width: 600px) {
+@media (max-width: 768px) {
   .status-strip {
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 8px;
   }
 
   .status-center {
@@ -608,19 +696,40 @@ body {
     justify-content: center;
   }
 
+  /* Force simpler layouts on mobile */
+  .layout-grid,
+  .layout-main-side,
+  .layout-triple {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(auto-fit, minmax(200px, 1fr));
+  }
+
+  .layout-main-side .panel-slot:first-child {
+    grid-row: auto;
+  }
+
   .direction-arrow {
-    max-width: 280px;
+    max-width: 200px;
   }
 
   .instruction-text {
-    font-size: clamp(36px, 10vw, 72px);
+    font-size: clamp(24px, 6vw, 48px);
+  }
+}
+
+@media (max-width: 480px) {
+  .layout-hsplit {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
   }
 
-  .debug-grid {
-    grid-template-columns: 1fr;
+  .panel-header {
+    height: 32px;
+    padding: 0 8px;
   }
 
-  .metrics-grid {
-    grid-template-columns: 1fr;
+  .view-selector {
+    font-size: 11px;
+    padding: 3px 6px;
   }
 }

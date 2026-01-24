@@ -21,9 +21,8 @@
           <span class="status-text" id="status-text">Disconnected</span>
         </div>
         <div class="status-center">
-          <button class="tab-btn active" data-tab="main">Guide</button>
-          <button class="tab-btn" data-tab="map">Global Map</button>
-          <button class="tab-btn" data-tab="debug">Debug</button>
+          <!-- Layout selector -->
+          <div class="layout-selector" id="layout-selector"></div>
         </div>
         <div class="status-right">
           <span class="time-display" id="time-display">--</span>
@@ -31,134 +30,9 @@
         </div>
       </header>
 
-      <!-- Tab: Main Display (Surgeon View) -->
-      <main class="tab-content active" id="tab-main">
-        <!-- Giant Direction Arrow -->
-        <div class="arrow-container" id="arrow-container">
-          <svg id="direction-arrow" viewBox="0 0 200 200" class="direction-arrow">
-            <!-- Background circle -->
-            <circle cx="100" cy="100" r="95" class="arrow-bg" />
-
-            <!-- Target zone (center) -->
-            <circle cx="100" cy="100" r="20" class="target-zone" id="target-zone" />
-
-            <!-- The arrow -->
-            <g id="arrow-group" class="arrow-group">
-              <line x1="100" y1="100" x2="100" y2="40" id="arrow-shaft" class="arrow-shaft" />
-              <polygon id="arrow-head" class="arrow-head" points="100,30 85,55 115,55" />
-            </g>
-
-            <!-- On-target checkmark (hidden by default) -->
-            <g id="check-group" class="check-group">
-              <circle cx="100" cy="100" r="45" class="check-bg" />
-              <polyline points="75,100 92,117 125,84" class="check-mark" />
-            </g>
-          </svg>
-        </div>
-
-        <!-- Giant Instruction Text -->
-        <div class="instruction-area">
-          <div class="instruction-text" id="instruction-text">CONNECT</div>
-          <div class="instruction-detail" id="instruction-detail">Press Connect below</div>
-        </div>
-
-        <!-- Distance indicator -->
-        <div class="distance-bar-container" id="distance-bar-container">
-          <div class="distance-bar">
-            <div class="distance-fill" id="distance-fill"></div>
-            <div class="distance-marker" id="distance-marker"></div>
-          </div>
-          <div class="distance-labels">
-            <span>FAR</span>
-            <span>ON TARGET</span>
-          </div>
-        </div>
-      </main>
-
-      <!-- Tab: Global Map -->
-      <main class="tab-content" id="tab-map">
-        <div class="map-container">
-          <canvas id="global-map-canvas" width="500" height="500"></canvas>
-          <div class="map-info">
-            <div class="map-info-item">
-              <span class="map-label">Array Position</span>
-              <span class="map-value" id="map-array-pos">--, --</span>
-            </div>
-            <div class="map-info-item">
-              <span class="map-label">Best Cluster</span>
-              <span class="map-value" id="map-best-cluster">--</span>
-            </div>
-            <div class="map-info-item">
-              <span class="map-label">Explored Area</span>
-              <span class="map-value" id="map-explored">0%</span>
-            </div>
-          </div>
-          <div class="map-legend">
-            <div class="legend-item">
-              <span class="legend-color" style="border: 2px solid #00ffff;"></span>
-              <span>Current View</span>
-            </div>
-            <div class="legend-item">
-              <span class="legend-color" style="background: #00ff88;"></span>
-              <span>Best Cluster</span>
-            </div>
-            <div class="legend-item">
-              <span class="legend-color" style="background: #ff8800;"></span>
-              <span>Tracked Hotspots</span>
-            </div>
-          </div>
-        </div>
-      </main>
-
-      <!-- Tab: Debug View -->
-      <main class="tab-content" id="tab-debug">
-        <div class="debug-grid">
-          <div class="debug-card">
-            <div class="debug-card-header">Live Activity (32x32)</div>
-            <canvas id="heatmap-live" width="320" height="320"></canvas>
-          </div>
-          <div class="debug-card">
-            <div class="debug-card-header">Tracked Clusters</div>
-            <canvas id="heatmap-clusters" width="320" height="320"></canvas>
-          </div>
-          <div class="debug-card debug-metrics">
-            <div class="debug-card-header">Metrics</div>
-            <div class="metrics-grid">
-              <div class="metric">
-                <span class="metric-label">Cluster Center</span>
-                <span class="metric-value" id="debug-center">--, --</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Confidence</span>
-                <span class="metric-value" id="debug-confidence">--%</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Distance</span>
-                <span class="metric-value" id="debug-distance">--</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Cursor Vx</span>
-                <span class="metric-value" id="debug-vx">--</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Cursor Vy</span>
-                <span class="metric-value" id="debug-vy">--</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Active Hotspots</span>
-                <span class="metric-value" id="debug-hotspots">--</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Tracked Total</span>
-                <span class="metric-value" id="debug-tracked">--</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Array Movement</span>
-                <span class="metric-value" id="debug-movement">--</span>
-              </div>
-            </div>
-          </div>
-        </div>
+      <!-- Main Layout Container -->
+      <main class="layout-container" id="layout-container">
+        <!-- Panels will be dynamically created by LayoutManager -->
       </main>
 
       <!-- Controls Panel (bottom) -->
@@ -183,6 +57,7 @@
     <script src="signal-processor.js"></script>
     <script src="cluster-tracker.js"></script>
     <script src="global-map.js"></script>
+    <script src="layout-manager.js"></script>
     <script src="visualizer.js"></script>
     <script src="app.js"></script>
   </body>

@@ -1,7 +1,7 @@
 /**
  * Array Placement Guide - Main Application
  *
- * Clean, minimal surgeon-focused UI.
+ * Modular, surgeon-focused UI with flexible layouts.
  * ONE JOB: Tell the surgeon which way to move.
  */
 
@@ -21,6 +21,9 @@ class ArrayPlacementApp {
         this.signalProcessor = null;
         this.clusterTracker = null;
         this.globalMap = null;
+
+        // UI modules
+        this.layoutManager = null;
         this.visualizer = null;
 
         // Frame management
@@ -46,7 +49,7 @@ class ArrayPlacementApp {
     init() {
         console.log('Array Placement Guide initializing...');
 
-        // Initialize modules
+        // Initialize processing modules
         this.signalProcessor = new SignalProcessor({
             fs: this.fs,
             nChannels: 1024,
@@ -62,7 +65,7 @@ class ArrayPlacementApp {
             threshold: 0.35,
             minClusterSize: 3,
             hotspotDecay: 0.98,
-            peakTimeout: 3000
+            peakTimeout: 10000
         });
 
         this.globalMap = new GlobalBrainMap({
@@ -71,8 +74,22 @@ class ArrayPlacementApp {
             movementScale: 1.5
         });
 
+        // Initialize layout manager
+        this.layoutManager = new LayoutManager('layout-container');
+        this.layoutManager.init();
+
+        // Handle layout changes - re-init canvases
+        this.layoutManager.onLayoutChange = () => {
+            this.visualizer.canvasContexts.clear();
+        };
+
+        this.layoutManager.onPanelChange = () => {
+            this.visualizer.canvasContexts.clear();
+        };
+
+        // Initialize visualizer with layout manager
         this.visualizer = new Visualizer();
-        this.visualizer.init();
+        this.visualizer.init(this.layoutManager);
 
         // Setup UI handlers
         this.setupUIHandlers();
@@ -90,14 +107,6 @@ class ArrayPlacementApp {
      * Setup UI event handlers
      */
     setupUIHandlers() {
-        // Tab switching
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const tabId = btn.dataset.tab;
-                this.switchTab(tabId);
-            });
-        });
-
         // Controls panel toggle
         const controlsToggle = document.getElementById('controls-toggle');
         const controlsPanel = document.getElementById('controls-panel');
@@ -149,21 +158,6 @@ class ArrayPlacementApp {
                 this.resetState();
             });
         }
-    }
-
-    /**
-     * Switch active tab
-     */
-    switchTab(tabId) {
-        // Update buttons
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.tab === tabId);
-        });
-
-        // Update content
-        document.querySelectorAll('.tab-content').forEach(content => {
-            content.classList.toggle('active', content.id === `tab-${tabId}`);
-        });
     }
 
     /**
@@ -348,11 +342,12 @@ class ArrayPlacementApp {
         // 4. Get guidance direction
         const guidance = this.clusterTracker.getGuidanceDirection();
 
-        // 5. Update global map
+        // 5. Update global map (now with cluster entities for better anchoring)
         this.globalMap.update(
             processed.normalized,
             movement,
-            this.clusterTracker.peakPositions
+            this.clusterTracker.peakPositions,
+            this.clusterTracker.getClusters()  // Pass cluster entities
         );
 
         // 6. Update main view

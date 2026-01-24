@@ -1,44 +1,32 @@
 /**
- * Visualizer Module - Clean Surgeon UI
+ * Visualizer Module - Modular Panel Rendering
  *
- * Renders:
- * - Main view: SVG arrow + instruction text
- * - Global map: Canvas with accumulated activity
- * - Debug view: Heatmaps and metrics
+ * Works with LayoutManager to render content into dynamically created panels.
+ * Each panel type (guide, global-map, live, memory, metrics) can appear
+ * in multiple slots simultaneously.
  */
 
 class Visualizer {
     constructor() {
-        // Canvas contexts
-        this.globalMapCtx = null;
-        this.heatmapLiveCtx = null;
-        this.heatmapClustersCtx = null;
-
-        // Inferno-inspired colormap
+        // Colormap for heatmaps
         this.colormap = this.generateColormap();
 
         // Grid config
         this.gridSize = 32;
         this.mapSize = 128;
+
+        // Layout manager reference
+        this.layoutManager = null;
+
+        // Canvas contexts cache
+        this.canvasContexts = new Map();
     }
 
     /**
-     * Initialize canvases
+     * Initialize with layout manager
      */
-    init() {
-        const globalMapCanvas = document.getElementById('global-map-canvas');
-        const heatmapLive = document.getElementById('heatmap-live');
-        const heatmapClusters = document.getElementById('heatmap-clusters');
-
-        if (globalMapCanvas) {
-            this.globalMapCtx = globalMapCanvas.getContext('2d');
-        }
-        if (heatmapLive) {
-            this.heatmapLiveCtx = heatmapLive.getContext('2d');
-        }
-        if (heatmapClusters) {
-            this.heatmapClustersCtx = heatmapClusters.getContext('2d');
-        }
+    init(layoutManager) {
+        this.layoutManager = layoutManager;
     }
 
     /**
@@ -85,21 +73,50 @@ class Visualizer {
     }
 
     /**
-     * Update the main surgeon view (SVG arrow + text)
+     * Get canvas context, creating if needed
+     */
+    getContext(canvas) {
+        if (!canvas) return null;
+
+        if (!this.canvasContexts.has(canvas)) {
+            this.canvasContexts.set(canvas, canvas.getContext('2d'));
+        }
+        return this.canvasContexts.get(canvas);
+    }
+
+    /**
+     * Update all guide panels
      */
     updateMainView(guidance) {
-        const app = document.getElementById('app');
-        const arrowGroup = document.getElementById('arrow-group');
-        const arrowShaft = document.getElementById('arrow-shaft');
-        const arrowHead = document.getElementById('arrow-head');
-        const instructionText = document.getElementById('instruction-text');
-        const instructionDetail = document.getElementById('instruction-detail');
-        const distanceMarker = document.getElementById('distance-marker');
-        const distanceFill = document.getElementById('distance-fill');
+        if (!this.layoutManager) return;
+
+        const panels = this.layoutManager.getPanelsOfType('guide');
+
+        for (const panel of panels) {
+            this.updateGuidePanel(panel, guidance);
+        }
+    }
+
+    /**
+     * Update a single guide panel
+     */
+    updateGuidePanel(panel, guidance) {
+        const content = panel.content;
+        const slotId = panel.slotId;
+
+        // Get elements
+        const arrowGroup = content.querySelector('.arrow-group');
+        const arrowShaft = content.querySelector('.arrow-shaft');
+        const arrowHead = content.querySelector('.arrow-head');
+        const instructionText = content.querySelector('.instruction-text');
+        const instructionDetail = content.querySelector('.instruction-detail');
+        const distanceMarker = content.querySelector('.distance-marker');
+        const distanceFill = content.querySelector('.distance-fill');
+
+        // Update panel state class
+        content.classList.remove('on-target', 'acquiring');
 
         if (!guidance) {
-            // No guidance - searching state
-            app.classList.remove('on-target', 'acquiring');
             if (instructionText) instructionText.textContent = 'SEARCHING';
             if (instructionDetail) instructionDetail.textContent = 'Looking for activity...';
             if (arrowGroup) arrowGroup.style.display = 'none';
@@ -109,11 +126,10 @@ class Visualizer {
         const { direction, isOnTarget, distance, distanceMm } = guidance;
 
         // Update state classes
-        app.classList.remove('on-target', 'acquiring');
         if (isOnTarget) {
-            app.classList.add('on-target');
+            content.classList.add('on-target');
         } else if (distance < 10) {
-            app.classList.add('acquiring');
+            content.classList.add('acquiring');
         }
 
         // Update arrow
@@ -123,12 +139,10 @@ class Visualizer {
             } else {
                 arrowGroup.style.display = 'block';
 
-                // Calculate arrow rotation
                 const angle = direction?.angle || 0;
                 const magnitude = Math.min(1, (direction?.magnitude || 0) * 1.5);
-                const length = 30 + magnitude * 40;  // 30-70 range
+                const length = 30 + magnitude * 40;
 
-                // Arrow points in direction to move
                 const radians = angle * Math.PI / 180;
                 const endX = 100 + Math.cos(radians) * length;
                 const endY = 100 - Math.sin(radians) * length;
@@ -169,7 +183,6 @@ class Visualizer {
 
         // Update distance bar
         if (distanceMarker && distanceFill) {
-            // Distance of 0 = right side (on target), distance of 20+ = left side (far)
             const maxDist = 20;
             const normalizedDist = Math.min(1, (distance || 0) / maxDist);
             const position = (1 - normalizedDist) * 100;
@@ -183,7 +196,6 @@ class Visualizer {
      * Convert angle to direction text
      */
     getDirectionText(angle) {
-        // Normalize angle to 0-360
         let a = angle;
         while (a < 0) a += 360;
         while (a >= 360) a -= 360;
@@ -199,13 +211,28 @@ class Visualizer {
     }
 
     /**
-     * Render global map
+     * Render all global map panels
      */
     renderGlobalMap(globalMap) {
-        if (!this.globalMapCtx || !globalMap) return;
+        if (!this.layoutManager || !globalMap) return;
 
-        const ctx = this.globalMapCtx;
-        const canvas = ctx.canvas;
+        const panels = this.layoutManager.getPanelsOfType('global-map');
+
+        for (const panel of panels) {
+            this.renderGlobalMapPanel(panel, globalMap);
+        }
+    }
+
+    /**
+     * Render a single global map panel
+     */
+    renderGlobalMapPanel(panel, globalMap) {
+        const canvas = panel.canvas;
+        if (!canvas) return;
+
+        const ctx = this.getContext(canvas);
+        if (!ctx) return;
+
         const w = canvas.width;
         const h = canvas.height;
 
@@ -284,8 +311,8 @@ class Visualizer {
             const hy = h.y * scaleY;
 
             ctx.beginPath();
-            ctx.arc(hx, hy, 4 + h.confidence * 4, 0, Math.PI * 2);
-            ctx.fillStyle = i === 0 ? '#00ff88' : `rgba(255, 136, 0, ${h.confidence})`;
+            ctx.arc(hx, hy, 4 + (h.confidence || 0.5) * 4, 0, Math.PI * 2);
+            ctx.fillStyle = i === 0 ? '#00ff88' : `rgba(255, 136, 0, ${h.confidence || 0.5})`;
             ctx.fill();
         }
 
@@ -311,20 +338,21 @@ class Visualizer {
             ctx.stroke();
         }
 
-        // Update map info displays
-        const arrayPosEl = document.getElementById('map-array-pos');
-        const bestClusterEl = document.getElementById('map-best-cluster');
-        const exploredEl = document.getElementById('map-explored');
+        // Update info displays
+        const content = panel.content;
+        const posEl = content.querySelector('[data-target^="map-pos"]');
+        const bestEl = content.querySelector('[data-target^="map-best"]');
+        const exploredEl = content.querySelector('[data-target^="map-explored"]');
 
-        if (arrayPosEl) {
+        if (posEl) {
             const ax = globalMap.arrayPosition.x.toFixed(0);
             const ay = globalMap.arrayPosition.y.toFixed(0);
-            arrayPosEl.textContent = `${ax}, ${ay}`;
+            posEl.textContent = `${ax}, ${ay}`;
         }
 
-        if (bestClusterEl && globalMap.bestRegion) {
+        if (bestEl && globalMap.bestRegion) {
             const dist = globalMap.getDirectionToBest();
-            bestClusterEl.textContent = dist ? `${dist.distanceMm.toFixed(1)}mm away` : '--';
+            bestEl.textContent = dist ? `${dist.distanceMm.toFixed(1)}mm away` : '--';
         }
 
         if (exploredEl) {
@@ -333,14 +361,30 @@ class Visualizer {
     }
 
     /**
-     * Render live heatmap (debug view)
+     * Render all live heatmap panels
      */
     renderLiveHeatmap(normalizedGrid, clusterCenter, peaks) {
-        if (!this.heatmapLiveCtx || !normalizedGrid) return;
+        if (!this.layoutManager || !normalizedGrid) return;
 
-        const ctx = this.heatmapLiveCtx;
-        const w = ctx.canvas.width;
-        const h = ctx.canvas.height;
+        const panels = this.layoutManager.getPanelsOfType('live');
+
+        for (const panel of panels) {
+            this.renderLiveHeatmapPanel(panel, normalizedGrid, clusterCenter, peaks);
+        }
+    }
+
+    /**
+     * Render a single live heatmap panel
+     */
+    renderLiveHeatmapPanel(panel, normalizedGrid, clusterCenter, peaks) {
+        const canvas = panel.canvas;
+        if (!canvas) return;
+
+        const ctx = this.getContext(canvas);
+        if (!ctx) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
         const cellW = w / this.gridSize;
         const cellH = h / this.gridSize;
 
@@ -383,7 +427,7 @@ class Visualizer {
 
                 ctx.beginPath();
                 ctx.arc(px, py, 4, 0, Math.PI * 2);
-                ctx.fillStyle = '#ff8800';
+                ctx.fillStyle = peak.active ? '#ff8800' : 'rgba(255, 136, 0, 0.4)';
                 ctx.fill();
             }
         }
@@ -402,14 +446,30 @@ class Visualizer {
     }
 
     /**
-     * Render tracked clusters heatmap (memory view)
+     * Render all cluster memory panels
      */
     renderClustersHeatmap(memoryGrid) {
-        if (!this.heatmapClustersCtx || !memoryGrid) return;
+        if (!this.layoutManager || !memoryGrid) return;
 
-        const ctx = this.heatmapClustersCtx;
-        const w = ctx.canvas.width;
-        const h = ctx.canvas.height;
+        const panels = this.layoutManager.getPanelsOfType('memory');
+
+        for (const panel of panels) {
+            this.renderMemoryHeatmapPanel(panel, memoryGrid);
+        }
+    }
+
+    /**
+     * Render a single memory heatmap panel
+     */
+    renderMemoryHeatmapPanel(panel, memoryGrid) {
+        const canvas = panel.canvas;
+        if (!canvas) return;
+
+        const ctx = this.getContext(canvas);
+        if (!ctx) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
         const cellW = w / this.gridSize;
         const cellH = h / this.gridSize;
 
@@ -433,24 +493,39 @@ class Visualizer {
     }
 
     /**
-     * Update debug metrics
+     * Update all metrics panels
      */
     updateDebugMetrics(data) {
-        const setEl = (id, value) => {
-            const el = document.getElementById(id);
+        if (!this.layoutManager) return;
+
+        const panels = this.layoutManager.getPanelsOfType('metrics');
+
+        for (const panel of panels) {
+            this.updateMetricsPanel(panel, data);
+        }
+    }
+
+    /**
+     * Update a single metrics panel
+     */
+    updateMetricsPanel(panel, data) {
+        const content = panel.content;
+
+        const setEl = (selector, value) => {
+            const el = content.querySelector(`[data-target^="${selector}"]`);
             if (el) el.textContent = value;
         };
 
         if (data.center) {
-            setEl('debug-center', `${data.center.row?.toFixed(1)}, ${data.center.col?.toFixed(1)}`);
+            setEl('metric-center', `${data.center.row?.toFixed(1)}, ${data.center.col?.toFixed(1)}`);
         }
-        setEl('debug-confidence', data.confidence ? `${(data.confidence * 100).toFixed(0)}%` : '--%');
-        setEl('debug-distance', data.distance ? `${data.distance.toFixed(1)}` : '--');
-        setEl('debug-vx', data.vx?.toFixed(1) || '--');
-        setEl('debug-vy', data.vy?.toFixed(1) || '--');
-        setEl('debug-hotspots', data.activeHotspots?.toString() || '--');
-        setEl('debug-tracked', data.trackedHotspots?.toString() || '--');
-        setEl('debug-movement', data.movement || '--');
+        setEl('metric-confidence', data.confidence ? `${(data.confidence * 100).toFixed(0)}%` : '--%');
+        setEl('metric-distance', data.distance ? `${data.distance.toFixed(1)}` : '--');
+        setEl('metric-vx', data.vx?.toFixed(1) || '--');
+        setEl('metric-vy', data.vy?.toFixed(1) || '--');
+        setEl('metric-active', data.activeHotspots?.toString() || '--');
+        setEl('metric-tracked', data.trackedHotspots?.toString() || '--');
+        setEl('metric-movement', data.movement || '--');
     }
 
     /**
