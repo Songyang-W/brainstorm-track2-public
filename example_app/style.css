@@ -1,0 +1,626 @@
+/*
+ * Array Placement Guide - Clean Surgeon UI
+ * ONE JOB: Tell the surgeon which way to move
+ * Readable from 6+ feet, zero cognitive load
+ */
+
+:root {
+  /* Colors - high contrast, purposeful */
+  --bg: #f8f9fa;
+  --surface: #ffffff;
+  --text: #1a1a2e;
+  --text-muted: #6b7280;
+
+  /* State colors */
+  --blue: #2563eb;
+  --green: #059669;
+  --green-light: #d1fae5;
+  --amber: #d97706;
+  --amber-light: #fef3c7;
+  --red: #dc2626;
+  --gray: #9ca3af;
+
+  /* Typography */
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+}
+
+/* ============================================
+   App Layout
+   ============================================ */
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* ============================================
+   Status Strip (top)
+   ============================================ */
+
+.status-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid #e5e7eb;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--gray);
+  transition: background 200ms;
+}
+
+.app.connected .status-dot {
+  background: var(--green);
+}
+
+.app.connecting .status-dot {
+  background: var(--amber);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+.status-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.status-center {
+  display: flex;
+  gap: 4px;
+  background: #f3f4f6;
+  padding: 4px;
+  border-radius: 10px;
+}
+
+.tab-btn {
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 150ms;
+}
+
+.tab-btn:hover {
+  color: var(--text);
+}
+
+.tab-btn.active {
+  background: white;
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.time-display,
+.fps-display {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================
+   Tab Content
+   ============================================ */
+
+.tab-content {
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  gap: 20px;
+  background: var(--surface);
+  overflow: auto;
+}
+
+.tab-content.active {
+  display: flex;
+}
+
+/* ============================================
+   Main Tab - Surgeon View
+   ============================================ */
+
+/* Acquiring state */
+.app.acquiring #tab-main {
+  background: var(--amber-light);
+}
+
+/* On target state */
+.app.on-target #tab-main {
+  background: var(--green-light);
+}
+
+/* Giant Direction Arrow */
+.arrow-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 50vh;
+  width: 100%;
+}
+
+.direction-arrow {
+  width: 100%;
+  max-width: 400px;
+  height: auto;
+}
+
+.arrow-bg {
+  fill: var(--bg);
+  stroke: #e5e7eb;
+  stroke-width: 2;
+}
+
+.target-zone {
+  fill: none;
+  stroke: #d1d5db;
+  stroke-width: 2;
+  stroke-dasharray: 8 4;
+}
+
+.app.on-target .target-zone {
+  fill: var(--green);
+  stroke: var(--green);
+  stroke-dasharray: none;
+}
+
+.arrow-shaft {
+  stroke: var(--blue);
+  stroke-width: 12;
+  stroke-linecap: round;
+}
+
+.arrow-head {
+  fill: var(--blue);
+}
+
+.app.on-target .arrow-group {
+  display: none;
+}
+
+.check-group {
+  display: none;
+}
+
+.app.on-target .check-group {
+  display: block;
+}
+
+.check-bg {
+  fill: var(--green);
+}
+
+.check-mark {
+  fill: none;
+  stroke: white;
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Giant Instruction Text */
+.instruction-area {
+  text-align: center;
+  padding: 0 20px;
+}
+
+.instruction-text {
+  font-size: clamp(48px, 12vw, 96px);
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--text);
+}
+
+.app.on-target .instruction-text {
+  color: var(--green);
+}
+
+.app.acquiring .instruction-text {
+  color: var(--amber);
+}
+
+.instruction-detail {
+  margin-top: 8px;
+  font-size: clamp(16px, 3vw, 24px);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.app.on-target .instruction-detail {
+  color: var(--green);
+}
+
+/* Distance Bar */
+.distance-bar-container {
+  width: 100%;
+  max-width: 400px;
+  padding: 0 20px;
+}
+
+.distance-bar {
+  height: 16px;
+  background: linear-gradient(to right, var(--amber) 0%, var(--green) 100%);
+  border-radius: 8px;
+  position: relative;
+  overflow: visible;
+}
+
+.distance-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 8px 0 0 8px;
+  transition: width 150ms ease-out;
+}
+
+.distance-marker {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
+  background: white;
+  border: 3px solid var(--text);
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: left 150ms ease-out;
+}
+
+.distance-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ============================================
+   Global Map Tab
+   ============================================ */
+
+.map-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 600px;
+}
+
+#global-map-canvas {
+  width: 100%;
+  max-width: 500px;
+  aspect-ratio: 1;
+  background: #1a1a2e;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+.map-info {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.map-info-item {
+  text-align: center;
+}
+
+.map-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.map-value {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-legend {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.legend-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+/* ============================================
+   Debug Tab
+   ============================================ */
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  width: 100%;
+  max-width: 1200px;
+  align-items: start;
+}
+
+.debug-card {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+
+.debug-card-header {
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+.debug-card canvas {
+  width: 100%;
+  display: block;
+  background: #1a1a2e;
+}
+
+.debug-metrics {
+  padding: 0;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  background: #e5e7eb;
+}
+
+.metric {
+  padding: 12px 16px;
+  background: white;
+}
+
+.metric-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================
+   Controls Panel (bottom)
+   ============================================ */
+
+.controls-panel {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-top: 1px solid #e5e7eb;
+  z-index: 10;
+}
+
+.controls-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.controls-toggle svg {
+  transition: transform 200ms ease;
+}
+
+.controls-panel.expanded .controls-toggle svg {
+  transform: rotate(180deg);
+}
+
+.controls-content {
+  display: none;
+  padding: 0 20px 20px;
+}
+
+.controls-panel.expanded .controls-content {
+  display: block;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ws-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 150ms;
+}
+
+.ws-input:focus {
+  border-color: var(--blue);
+}
+
+.btn {
+  padding: 10px 20px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 100ms, transform 100ms;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-connect {
+  background: var(--blue);
+  color: white;
+}
+
+.btn-connect:hover {
+  background: #1d4ed8;
+}
+
+.app.connected .btn-connect {
+  background: var(--red);
+}
+
+.app.connected .btn-connect:hover {
+  background: #b91c1c;
+}
+
+.btn-reset {
+  background: #f3f4f6;
+  color: var(--text);
+}
+
+.btn-reset:hover {
+  background: #e5e7eb;
+}
+
+.btn-preset {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.btn-preset:hover {
+  background: #fde68a;
+}
+
+/* ============================================
+   Responsive
+   ============================================ */
+
+@media (max-width: 600px) {
+  .status-strip {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .status-center {
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .direction-arrow {
+    max-width: 280px;
+  }
+
+  .instruction-text {
+    font-size: clamp(36px, 10vw, 72px);
+  }
+
+  .debug-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+}
