@@ -26,12 +26,25 @@ class AnchoredPeak {
 
     /**
      * Update peak with new observation
+     * ENHANCED: Age-based anchoring - older peaks drift less
      */
     update(row, col, intensity) {
-        // Smooth position update (anchoring)
-        const smoothing = 0.3;
-        this.row = smoothing * row + (1 - smoothing) * this.row;
-        this.col = smoothing * col + (1 - smoothing) * this.col;
+        // Calculate age-based anchoring strength
+        const age = Date.now() - this.createdAt;
+        const ageSeconds = age / 1000;
+
+        // As peak ages, it becomes more anchored (less responsive to new positions)
+        // Starts at 0.3 smoothing, decreases to 0.05 over 10 seconds
+        const anchoringFactor = Math.min(0.9, ageSeconds / 10);
+        const smoothing = 0.3 * (1 - anchoringFactor * 0.85);
+
+        // Distance penalty: if observation is far from current position, trust it less
+        const dist = Math.sqrt(Math.pow(row - this.row, 2) + Math.pow(col - this.col, 2));
+        const distancePenalty = dist > 3 ? 0.3 : 1.0;
+        const effectiveSmoothing = smoothing * distancePenalty;
+
+        this.row = effectiveSmoothing * row + (1 - effectiveSmoothing) * this.row;
+        this.col = effectiveSmoothing * col + (1 - effectiveSmoothing) * this.col;
 
         this.intensity = intensity;
         this.maxIntensity = Math.max(this.maxIntensity, intensity);
@@ -167,6 +180,7 @@ class ClusterEntity {
 
     /**
      * Compute centroid from ALL anchored peaks (the key improvement!)
+     * ENHANCED: Age-based stability and distance-limited updates
      */
     recomputeCentroid() {
         if (this.peaks.length === 0) {
@@ -194,11 +208,29 @@ class ClusterEntity {
             if (this.smoothedCentroid === null) {
                 this.smoothedCentroid = { ...newCentroid };
             } else {
-                const smoothing = 0.2;
+                // Age-based anchoring: older clusters are more stable
+                const age = Date.now() - this.createdAt;
+                const ageSeconds = age / 1000;
+                const anchoringFactor = Math.min(0.95, ageSeconds / 8);
+
+                // Base smoothing decreases as cluster ages (more anchored)
+                const baseSmoothing = 0.15;
+                const smoothing = baseSmoothing * (1 - anchoringFactor * 0.9);
+
+                // Distance penalty: large jumps are suspicious
+                const dist = Math.sqrt(
+                    Math.pow(newCentroid.row - this.smoothedCentroid.row, 2) +
+                    Math.pow(newCentroid.col - this.smoothedCentroid.col, 2)
+                );
+                const distancePenalty = dist > 4 ? 0.2 : 1.0;
+                const effectiveSmoothing = smoothing * distancePenalty;
+
                 this.smoothedCentroid.row =
-                    smoothing * newCentroid.row + (1 - smoothing) * this.smoothedCentroid.row;
+                    effectiveSmoothing * newCentroid.row +
+                    (1 - effectiveSmoothing) * this.smoothedCentroid.row;
                 this.smoothedCentroid.col =
-                    smoothing * newCentroid.col + (1 - smoothing) * this.smoothedCentroid.col;
+                    effectiveSmoothing * newCentroid.col +
+                    (1 - effectiveSmoothing) * this.smoothedCentroid.col;
             }
 
             this.centroid = this.smoothedCentroid;
@@ -296,6 +328,7 @@ class ClusterTracker {
         this.prevCenter = null;
         this.movementHistory = [];
         this.movementHistoryLength = 20;
+        this.smoothedMovement = { dx: 0, dy: 0 };
 
         // Config
         this.peakMergeDistance = config.peakMergeDistance || 3;
@@ -731,50 +764,147 @@ class ClusterTracker {
      *
      * The approach: if neural activity center moves left on the grid,
      * the array must have moved right in brain space.
+     *
+     * ENHANCED: Uses exponential smoothing, velocity clamping, and
+     * recency-weighted history for much more stable movement inference.
      */
     inferArrayMovement() {
         if (!this.trackedCenter || !this.prevCenter) {
             this.prevCenter = this.trackedCenter ?
                 { ...this.trackedCenter } : null;
+            // Initialize smoothed velocity if needed
+            if (!this.smoothedMovement) {
+                this.smoothedMovement = { dx: 0, dy: 0 };
+            }
             return { dx: 0, dy: 0, confidence: 0 };
         }
 
         const dRow = this.trackedCenter.row - this.prevCenter.row;
         const dCol = this.trackedCenter.col - this.prevCenter.col;
+        const now = Date.now();
 
-        // Only consider significant movements (reduces noise)
-        const movementMagnitude = Math.sqrt(dRow * dRow + dCol * dCol);
-        if (movementMagnitude < 0.5) {
-            // Too small to be meaningful movement
-            this.prevCenter = { ...this.trackedCenter };
-            return { dx: 0, dy: 0, confidence: 0 };
+        // Raw movement magnitude
+        const rawMagnitude = Math.sqrt(dRow * dRow + dCol * dCol);
+
+        // Moderate noise threshold - balance between responsiveness and stability
+        const noiseThreshold = 0.3;
+
+        // Clamp maximum movement per frame to reject outliers
+        const maxMovementPerFrame = 4.0;
+
+        // Initialize smoothed movement if needed
+        if (!this.smoothedMovement) {
+            this.smoothedMovement = { dx: 0, dy: 0 };
         }
 
-        // Store movement
-        this.movementHistory.push({ dRow, dCol, time: Date.now() });
+        if (rawMagnitude < noiseThreshold) {
+            // Below noise threshold - slowly decay smoothed movement
+            this.smoothedMovement.dx *= 0.95;
+            this.smoothedMovement.dy *= 0.95;
+            this.prevCenter = { ...this.trackedCenter };
+
+            // Still return smoothed value (momentum keeps array moving smoothly)
+            const smoothedMag = Math.sqrt(
+                this.smoothedMovement.dx * this.smoothedMovement.dx +
+                this.smoothedMovement.dy * this.smoothedMovement.dy
+            );
+            return {
+                dx: this.smoothedMovement.dx,
+                dy: this.smoothedMovement.dy,
+                confidence: Math.min(0.5, smoothedMag * 0.3)
+            };
+        }
+
+        // Clamp movement to reject outliers (sudden jumps)
+        let clampedDRow = dRow;
+        let clampedDCol = dCol;
+        if (rawMagnitude > maxMovementPerFrame) {
+            const scale = maxMovementPerFrame / rawMagnitude;
+            clampedDRow *= scale;
+            clampedDCol *= scale;
+        }
+
+        // Store movement with timestamp
+        this.movementHistory.push({
+            dRow: clampedDRow,
+            dCol: clampedDCol,
+            time: now,
+            magnitude: Math.sqrt(clampedDRow * clampedDRow + clampedDCol * clampedDCol)
+        });
+
+        // Keep limited history
         while (this.movementHistory.length > this.movementHistoryLength) {
             this.movementHistory.shift();
         }
 
-        // Average recent movements (smoothing)
-        let avgDRow = 0, avgDCol = 0;
+        // Compute recency-weighted average (more recent = higher weight)
+        let totalWeight = 0;
+        let weightedDRow = 0;
+        let weightedDCol = 0;
+
         for (const m of this.movementHistory) {
-            avgDRow += m.dRow;
-            avgDCol += m.dCol;
+            const age = now - m.time;
+            // Exponential decay: half-life of 500ms
+            const recencyWeight = Math.exp(-age / 500);
+            // Also weight by magnitude (stronger movements more reliable)
+            const magnitudeWeight = Math.min(1, m.magnitude / 1.5);
+            const combinedWeight = recencyWeight * (0.5 + 0.5 * magnitudeWeight);
+
+            weightedDRow += m.dRow * combinedWeight;
+            weightedDCol += m.dCol * combinedWeight;
+            totalWeight += combinedWeight;
         }
-        avgDRow /= this.movementHistory.length;
-        avgDCol /= this.movementHistory.length;
+
+        let avgDRow = 0, avgDCol = 0;
+        if (totalWeight > 0.1) {
+            avgDRow = weightedDRow / totalWeight;
+            avgDCol = weightedDCol / totalWeight;
+        }
+
+        // Apply exponential smoothing to the averaged movement
+        // Higher factor = more responsive to new movements
+        const smoothingFactor = 0.4;
+        this.smoothedMovement.dx = smoothingFactor * (-avgDCol) +
+                                   (1 - smoothingFactor) * this.smoothedMovement.dx;
+        this.smoothedMovement.dy = smoothingFactor * (-avgDRow) +
+                                   (1 - smoothingFactor) * this.smoothedMovement.dy;
 
         // Update previous center
         this.prevCenter = { ...this.trackedCenter };
 
-        // Invert: cluster moving left on grid = array moving right in brain space
-        const magnitude = Math.sqrt(avgDRow * avgDRow + avgDCol * avgDCol);
+        // Compute final magnitude for confidence
+        const smoothedMagnitude = Math.sqrt(
+            this.smoothedMovement.dx * this.smoothedMovement.dx +
+            this.smoothedMovement.dy * this.smoothedMovement.dy
+        );
+
+        // Confidence based on:
+        // 1. Smoothed magnitude (consistent movement = higher confidence)
+        // 2. History consistency (all movements in same direction)
+        let directionConsistency = 0;
+        if (this.movementHistory.length >= 3) {
+            // Check if recent movements agree on direction
+            const recentMoves = this.movementHistory.slice(-5);
+            let sameDirection = 0;
+            for (const m of recentMoves) {
+                // Check if movement direction matches smoothed direction
+                const dotProduct = (-m.dCol) * this.smoothedMovement.dx +
+                                  (-m.dRow) * this.smoothedMovement.dy;
+                if (dotProduct > 0) sameDirection++;
+            }
+            directionConsistency = sameDirection / recentMoves.length;
+        }
+
+        // Confidence based on magnitude and direction consistency
+        // Higher base multiplier to get meaningful confidence values
+        const confidence = Math.min(1,
+            smoothedMagnitude * 0.5 * (0.6 + 0.4 * directionConsistency)
+        );
 
         return {
-            dx: -avgDCol,
-            dy: -avgDRow,
-            confidence: Math.min(1, magnitude * 0.5)  // Reduced confidence scaling
+            dx: this.smoothedMovement.dx,
+            dy: this.smoothedMovement.dy,
+            confidence: confidence
         };
     }
 
@@ -880,6 +1010,7 @@ class ClusterTracker {
         this.trackedCenter = null;
         this.prevCenter = null;
         this.movementHistory = [];
+        this.smoothedMovement = { dx: 0, dy: 0 };
     }
 }
 

@@ -1072,6 +1072,92 @@ body.resizing.resize-vertical {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  container-type: size;
+}
+
+/* Freeform window specific scaling overrides */
+.freeform-window .guide-panel-inner {
+  padding: 8px;
+  gap: 8px;
+}
+
+.freeform-window .direction-arrow {
+  max-width: min(90%, 70cqmin);
+}
+
+.freeform-window .instruction-text {
+  font-size: clamp(16px, 10cqw, 48px);
+}
+
+.freeform-window .instruction-detail {
+  font-size: clamp(10px, 4cqw, 18px);
+}
+
+.freeform-window .distance-bar-container {
+  max-width: min(90%, 70cqw);
+}
+
+.freeform-window .distance-labels {
+  font-size: clamp(8px, 3cqw, 12px);
+}
+
+.freeform-window .heatmap-panel-inner,
+.freeform-window .map-panel-inner {
+  padding: 8px;
+}
+
+.freeform-window .heatmap-canvas {
+  max-width: min(95%, 90cqmin);
+}
+
+.freeform-window .global-map-canvas {
+  max-width: min(95%, 90cqmin);
+}
+
+.freeform-window .map-info {
+  gap: 8px;
+}
+
+.freeform-window .map-label {
+  font-size: clamp(7px, 2.5cqw, 10px);
+}
+
+.freeform-window .map-value {
+  font-size: clamp(9px, 3cqw, 13px);
+}
+
+.freeform-window .metrics-panel-inner {
+  padding: 6px;
+  gap: 6px;
+}
+
+.freeform-window .metrics-status-bar {
+  padding: 6px 8px;
+  gap: 8px;
+}
+
+.freeform-window .status-label {
+  font-size: 9px;
+}
+
+.freeform-window .metric {
+  padding: 8px;
+}
+
+.freeform-window .metric-primary {
+  padding: 10px;
+}
+
+.freeform-window .metric-compact {
+  padding: 6px 8px;
+}
+
+.freeform-window .metrics-graph-section {
+  padding: 8px;
+}
+
+.freeform-window .metrics-graph {
+  height: 40px;
 }
 
 .freeform-resize-handle {

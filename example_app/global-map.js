@@ -56,6 +56,7 @@ class GlobalCluster {
 
     /**
      * Update with new local cluster observation
+     * ENHANCED: Much stronger anchoring with minimal drift
      * Preserves off-hotspot positions for structure memory
      */
     update(localCluster, arrayPosition, localGridSize) {
@@ -65,17 +66,38 @@ class GlobalCluster {
         const newX = arrayPosition.x - halfSize + localCluster.centroid.col;
         const newY = arrayPosition.y - halfSize + localCluster.centroid.row;
 
-        // Use VERY smooth updates for centroid stability (key for anchoring)
-        const centroidSmoothing = 0.1;
-        this.centroid.x = centroidSmoothing * newX + (1 - centroidSmoothing) * this.centroid.x;
-        this.centroid.y = centroidSmoothing * newY + (1 - centroidSmoothing) * this.centroid.y;
+        // Calculate age-based anchoring strength
+        // Older clusters are MORE stable (less responsive to new observations)
+        const age = Date.now() - this.createdAt;
+        const ageSeconds = age / 1000;
 
-        // Even smoother for the smoothed centroid
-        this.smoothedCentroid.x = 0.05 * newX + 0.95 * this.smoothedCentroid.x;
-        this.smoothedCentroid.y = 0.05 * newY + 0.95 * this.smoothedCentroid.y;
+        // Anchoring strength increases with age and observations
+        // After 10 seconds, smoothing factor becomes very small (0.01)
+        const anchoringFactor = Math.min(0.99, ageSeconds / 10);
+        const centroidSmoothing = 0.05 * (1 - anchoringFactor * 0.8);  // 0.05 -> 0.01 over time
 
-        // Peak position smoothing
-        const peakSmoothing = 0.15;
+        // Only update centroid if observation is reasonably close to current position
+        // This prevents drifting due to array movement noise
+        const observationDist = Math.sqrt(
+            Math.pow(newX - this.centroid.x, 2) +
+            Math.pow(newY - this.centroid.y, 2)
+        );
+
+        // If observation is too far (>8 units), likely due to noise or array movement
+        // Apply even less weight to prevent drift
+        const distancePenalty = observationDist > 8 ? 0.1 : 1.0;
+        const effectiveSmoothing = centroidSmoothing * distancePenalty;
+
+        this.centroid.x = effectiveSmoothing * newX + (1 - effectiveSmoothing) * this.centroid.x;
+        this.centroid.y = effectiveSmoothing * newY + (1 - effectiveSmoothing) * this.centroid.y;
+
+        // Smoothed centroid is even more stable (for visualization stability)
+        const smoothedAlpha = 0.02 * distancePenalty;
+        this.smoothedCentroid.x = smoothedAlpha * newX + (1 - smoothedAlpha) * this.smoothedCentroid.x;
+        this.smoothedCentroid.y = smoothedAlpha * newY + (1 - smoothedAlpha) * this.smoothedCentroid.y;
+
+        // Peak position smoothing - also age-dependent
+        const peakSmoothing = 0.08 * (1 - anchoringFactor * 0.5);
 
         // Track which global peaks got matched
         const matchedGlobalPeaks = new Set();
@@ -85,7 +107,7 @@ class GlobalCluster {
             const globalX = arrayPosition.x - halfSize + localPeak.col;
             const globalY = arrayPosition.y - halfSize + localPeak.row;
 
-            // Find matching global peak
+            // Find matching global peak - use TIGHTER radius (3 units instead of 5)
             let matched = false;
             let bestMatchIdx = -1;
             let bestMatchDist = Infinity;
@@ -97,7 +119,8 @@ class GlobalCluster {
                     Math.pow(globalY - globalPeak.y, 2)
                 );
 
-                if (dist < 5 && dist < bestMatchDist) {
+                // Tighter match radius for better anchoring
+                if (dist < 3 && dist < bestMatchDist) {
                     bestMatchDist = dist;
                     bestMatchIdx = i;
                 }
@@ -105,9 +128,14 @@ class GlobalCluster {
 
             if (bestMatchIdx >= 0) {
                 const globalPeak = this.globalPeaks[bestMatchIdx];
+
+                // Peaks that have been seen many times are MORE anchored
+                const peakAnchoringFactor = Math.min(0.9, (globalPeak.activationCount || 1) / 20);
+                const effectivePeakSmoothing = peakSmoothing * (1 - peakAnchoringFactor * 0.5);
+
                 // Update with smoothing (preserves position even when temporarily off)
-                globalPeak.x = peakSmoothing * globalX + (1 - peakSmoothing) * globalPeak.x;
-                globalPeak.y = peakSmoothing * globalY + (1 - peakSmoothing) * globalPeak.y;
+                globalPeak.x = effectivePeakSmoothing * globalX + (1 - effectivePeakSmoothing) * globalPeak.x;
+                globalPeak.y = effectivePeakSmoothing * globalY + (1 - effectivePeakSmoothing) * globalPeak.y;
                 globalPeak.intensity = localPeak.intensity;
                 globalPeak.maxIntensity = Math.max(globalPeak.maxIntensity, localPeak.maxIntensity);
                 globalPeak.active = localPeak.active;
@@ -118,7 +146,7 @@ class GlobalCluster {
             }
 
             // Add new peaks with lower threshold to capture structure
-            if (!matched && localPeak.intensity > 0.2) {
+            if (!matched && localPeak.intensity > 0.25) {  // Slightly higher threshold
                 this.globalPeaks.push({
                     x: globalX,
                     y: globalY,
@@ -136,7 +164,7 @@ class GlobalCluster {
             if (!matchedGlobalPeaks.has(i)) {
                 const peak = this.globalPeaks[i];
                 peak.active = false;
-                peak.intensity *= 0.98;  // Slow decay to remember position
+                peak.intensity *= 0.985;  // Even slower decay for stability
             }
         }
 
@@ -151,7 +179,7 @@ class GlobalCluster {
         const expectedPeaks = this.globalPeaks.length;
         const observedActive = localCluster.getActivePeakCount();
         const stabilityDelta = observedActive / Math.max(1, expectedPeaks);
-        this.structureStability = 0.9 * this.structureStability + 0.1 * stabilityDelta;
+        this.structureStability = 0.95 * this.structureStability + 0.05 * stabilityDelta;  // Slower stability updates
     }
 
     /**
@@ -258,17 +286,47 @@ class GlobalBrainMap {
 
     /**
      * Update global map with new local activity and movement
+     *
+     * KEY INSIGHT: When a cluster moves LEFT on the local grid, the array
+     * has moved RIGHT in brain space. The inferred movement already handles
+     * this inversion, so we apply it directly to array position.
      */
     update(normalizedGrid, movement, peaks, localClusters = null) {
+        // Initialize velocity tracking if not present
+        if (!this.smoothedVelocity) {
+            this.smoothedVelocity = { x: 0, y: 0 };
+        }
+
         // 1. Update array position based on inferred movement
-        if (movement && movement.confidence > 0.1) {
-            this.arrayPosition.x += movement.dx * this.movementScale;
-            this.arrayPosition.y += movement.dy * this.movementScale;
+        // Lower threshold to ensure movement is detected
+        if (movement && movement.confidence > 0.05) {
+            // Smooth the velocity - but be responsive enough to show movement
+            const velocitySmoothing = 0.4;  // Higher = more responsive
+            this.smoothedVelocity.x = velocitySmoothing * movement.dx + (1 - velocitySmoothing) * this.smoothedVelocity.x;
+            this.smoothedVelocity.y = velocitySmoothing * movement.dy + (1 - velocitySmoothing) * this.smoothedVelocity.y;
+
+            // Compute smoothed magnitude
+            const smoothedMagnitude = Math.sqrt(
+                this.smoothedVelocity.x * this.smoothedVelocity.x +
+                this.smoothedVelocity.y * this.smoothedVelocity.y
+            );
+
+            // Lower threshold - any meaningful movement should register
+            if (smoothedMagnitude > 0.1) {
+                // Scale movement - use smoothed velocity directly
+                const scaledMovement = this.movementScale;
+                this.arrayPosition.x += this.smoothedVelocity.x * scaledMovement;
+                this.arrayPosition.y += this.smoothedVelocity.y * scaledMovement;
+            }
 
             // Clamp to boundaries
             const margin = this.localGridSize / 2 + 5;
             this.arrayPosition.x = Math.max(margin, Math.min(this.mapSize - margin, this.arrayPosition.x));
             this.arrayPosition.y = Math.max(margin, Math.min(this.mapSize - margin, this.arrayPosition.y));
+        } else {
+            // Slowly decay velocity when no movement detected
+            this.smoothedVelocity.x *= 0.95;
+            this.smoothedVelocity.y *= 0.95;
         }
 
         // 2. Store position history
