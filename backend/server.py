@@ -196,14 +196,10 @@ class BCIServer:
                 # Process through signal pipeline
                 normalized, bad_channels = self.signal_pipeline.process(filtered)
 
-                # Get ground truth for position tracking (dev mode)
-                gt_data = None
-                if self.ground_truth is not None:
-                    gt_data = self._get_ground_truth(start_time_s)
-
                 # Update global mapper FIRST to get persistent_evidence
+                # Note: Global mapper now uses only observation-based tracking (no GT)
                 global_mapping = self.global_mapper.update(
-                    normalized, bad_channels, start_time_s, ground_truth=gt_data
+                    normalized, bad_channels, start_time_s
                 )
 
                 # Extract persistent_evidence for blended tracking

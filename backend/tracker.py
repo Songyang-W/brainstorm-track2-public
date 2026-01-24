@@ -523,8 +523,12 @@ class BCITracker:
         # Blend current belief_map with persistent_evidence for robust tracking
         blended_map = self.blended_tracker.blend(belief_map, persistent_evidence)
 
-        # Detect hotspots using blended map for stable centroid tracking
-        hotspot_result = self.hotspot_detector.detect(blended_map, bad_channels)
+        # Get current activity grid for direct detection
+        current_activity = normalized_power.reshape(self.grid_size, self.grid_size)
+
+        # Detect hotspots using current activity (what's actually displayed)
+        # This ensures the centroid marker matches visible activity
+        hotspot_result = self.hotspot_detector.detect(current_activity, bad_channels)
 
         # Calculate confidence based on hotspot strength
         if (
@@ -1171,7 +1175,6 @@ class GlobalMapper:
         normalized_power: np.ndarray,
         bad_channels: np.ndarray,
         time_s: float = 0.0,
-        ground_truth: dict | None = None,
     ) -> dict[str, Any]:
         """
         Update global mapping with new observation.
@@ -1180,7 +1183,6 @@ class GlobalMapper:
             normalized_power: Normalized power (n_channels,), [0, 1]
             bad_channels: Boolean mask of bad channels
             time_s: Current timestamp
-            ground_truth: Optional ground truth data (dev mode)
 
         Returns:
             Global mapping data for WebSocket message
@@ -1190,30 +1192,9 @@ class GlobalMapper:
         bad_mask = bad_channels.reshape(self.grid_size, self.grid_size)
 
         # 1. Position tracking - use hotspot drift detection
-        # Always run hotspot tracker to detect motion
+        # Always run hotspot tracker to detect motion (no ground truth cheating)
         dx, dy = self.hotspot_tracker.update(activity, bad_mask)
-
-        if ground_truth is not None:
-            # Dev mode: use ground truth to set position (more accurate)
-            center_row = (ground_truth["vy_pos"][0] + ground_truth["vy_neg"][0]) / 2 + 1
-            center_col = (ground_truth["vx_pos"][1] + ground_truth["vx_neg"][1]) / 2 + 1
-            # DEBUG: print values once per second
-            if int(time_s) != int(time_s - 0.02) and int(time_s) % 5 == 0:
-                print(
-                    f"DEBUG GT: vy_pos={ground_truth['vy_pos']}, vy_neg={ground_truth['vy_neg']}"
-                )
-                print(
-                    f"DEBUG GT: vx_pos={ground_truth['vx_pos']}, vx_neg={ground_truth['vx_neg']}"
-                )
-                print(
-                    f"DEBUG: center=({center_row}, {center_col}), array_pos before={self.global_map.array_position}"
-                )
-            self.global_map.set_position_from_ground_truth(center_row, center_col)
-            if int(time_s) != int(time_s - 0.02) and int(time_s) % 5 == 0:
-                print(f"DEBUG: array_pos after={self.global_map.array_position}")
-        else:
-            # Live mode: use hotspot-based motion tracking
-            self.global_map.update_position(dx, dy)
+        self.global_map.update_position(dx, dy)
 
         # 3. Integrate observation into global map
         self.global_map.integrate_observation(activity, bad_mask, time_s)
