@@ -21,7 +21,8 @@ Design and build a web application that:
 * **Spontaneous Activity**: The brain is never silent. Background regions fire randomly even without specific intent. Your system must distinguish true functional "lighting up" from this constant biological background noise.
 * **Scientific Uncertainty**: This is an open research field—there is no algorithm in the world that can 100% perfectly decode these signals. Your solution must be robust enough to work despite this inherent ambiguity.
 * **Blind Navigation**: You need to calculate a guidance vector (telling the doctor where to move) without knowing their current hand trajectory or velocity. You are guiding a moving target with no external motion tracking.
-* 
+
+
 ## 📚 Documentation
 
 | Document | Purpose |
