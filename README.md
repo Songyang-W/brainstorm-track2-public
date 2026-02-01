@@ -35,7 +35,19 @@ Design and build a web application that:
 >
 > ![Global Map Animation](global_map.gif)
 
+**3. Averaged Reconstruction**
+> Here is what the averaged reconstructed video looks like. By averaging activity aligned to movement events, clearer patterns emerge from the noise:
+>
+> ![Averaged Reconstruction](averaged_reconstructed.png)
 
+### 🧠 Neural Decoding (CNN)
+> We trained a **3D Convolutional Neural Network (CNN)** to decode movement intention directly from the raw data.
+>
+> * **Input:** 1-second video clips of neural activity (500 timepoints $\times$ 32$\times$32 grid).
+> * **Architecture:** The model uses spatiotemporal convolutions (`Conv3d`) to extract features across both time and space, effectively "watching" how neural waves propagate across the cortex.
+> * **Output:** The network predicts the precise 2D direction vector (`delta_row`, `delta_col`) representing the surgeon's hand movement.
+>
+> ![CNN Motion Prediction](cnn_motion_predict.png)
 
 ## 📚 Documentation
 
