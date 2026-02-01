@@ -22,7 +22,15 @@ Design and build a web application that:
 * **Scientific Uncertainty**: This is an open research field—there is no algorithm in the world that can 100% perfectly decode these signals. Your solution must be robust enough to work despite this inherent ambiguity.
 * **Blind Navigation**: You need to calculate a guidance vector (telling the doctor where to move) without knowing their current hand trajectory or velocity. You are guiding a moving target with no external motion tracking.
 
+### 📹 Visualization Breakdown
 
+**1. The Preprocessed View**
+> Here is what the preprocessed neural activity looks like (raw signal):
+> 🎥 **[Watch Raw Array Recording](raw%20array%20recording.mov)**
+
+**2. The Stabilized Global Map**
+> Here is the result of adding motion information to stabilize the brain view while the "camera" moves:
+> 🎥 **[Watch Global Map Recording](global%20map%20recording.mov)**
 ## 📚 Documentation
 
 | Document | Purpose |
