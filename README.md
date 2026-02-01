@@ -28,7 +28,7 @@ Design and build a web application that:
 **1. The Preprocessed View**
 > Here is what the preprocessed neural activity looks like (raw signal):
 >
-> ![Raw Signal Animation](raw_recording.gif)
+> ![Raw Signal Animation](raw_array.gif)
 
 **2. The Stabilized Global Map**
 > Here is the result of adding motion information to stabilize the brain view while the "camera" moves:
