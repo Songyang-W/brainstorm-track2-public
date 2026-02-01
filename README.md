@@ -49,6 +49,19 @@ Design and build a web application that:
 >
 > ![CNN Motion Prediction](cnn_motion_predict.png)
 
+## 🛠️ Preprocessing Pipeline
+
+**1. Signal Processing Chain**
+* **Bandpass Filtering:** We use a stateful 4th-order Butterworth filter to isolate the **High-Gamma band (70-150 Hz)**, which serves as a reliable proxy for local neural population firing.
+* **Power Computation:** Mean power is calculated by squaring the filtered signal and averaging it over batch windows.
+* **Temporal & Spatial Smoothing:** We apply an Exponential Moving Average (EMA, $\alpha=0.2$) to reduce flicker and a Gaussian blur ($\sigma=1.5$ pixels) to ensure spatial coherence across the $32 \times 32$ grid.
+* **Normalization:** To prevent artifacts or bad channels from dominating the heatmap, data is clipped at the 95th percentile and rescaled to a `[0,1]` range.
+
+**2. Learned Denoising (U-Net)**
+* **Architecture:** A lightweight **U-Net autoencoder** (~274 KB) maps noisy input grids to clean "confidence maps."
+* **Structure Preservation:** The model is trained to recognize hotspots as spatially coherent blobs, effectively filtering out intermittent channel spikes and 60 Hz line noise.
+* **Real-Time Efficiency:** The denoiser runs in **<5 ms on a CPU**, contributing to a total system latency of <50 ms to ensure immediate feedback for the surgeon.
+
 ## 📚 Documentation
 
 | Document | Purpose |
