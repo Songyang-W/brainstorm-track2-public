@@ -1,3 +1,5 @@
+[![BrainStorm 2026 - Track 2 Demo](https://img.youtube.com/vi/a3brRuCG1hk/0.jpg)](https://www.youtube.com/watch?v=a3brRuCG1hk)
+
 # BrainStorm 2026 - Track 2: The "Compass" Challenge
 
 Build a real-time visualization tool to guide neurosurgeons in placing a brain-computer interface array over the optimal region of the motor cortex.
@@ -13,6 +15,13 @@ Design and build a web application that:
 
 > **Key insight**: Neural activity over tuned regions is not uniform — it depends on cursor movement direction. A good solution identifies coherent **areas of interest** rather than chasing individual activation spikes.
 
+> **The Analogy**: Think of it like processing a live video feed from a shaky, moving camera. We have to filter out the 'snow' (noise) to find specific objects that light up, track them as the camera moves, and point an arrow telling the surgeon exactly where to center the frame.
+### ⚙️ Backend Engineering Challenges
+* **Latency vs. Complexity**: We theoretically know how to filter noise, but we cannot use heavy, slow algorithms. The system must provide **hard real-time feedback** to the surgeon, meaning signal processing must be extremely optimized.
+* **Spontaneous Activity**: The brain is never silent. Background regions fire randomly even without specific intent. Your system must distinguish true functional "lighting up" from this constant biological background noise.
+* **Scientific Uncertainty**: This is an open research field—there is no algorithm in the world that can 100% perfectly decode these signals. Your solution must be robust enough to work despite this inherent ambiguity.
+* **Blind Navigation**: You need to calculate a guidance vector (telling the doctor where to move) without knowing their current hand trajectory or velocity. You are guiding a moving target with no external motion tracking.
+* 
 ## 📚 Documentation
 
 | Document | Purpose |
